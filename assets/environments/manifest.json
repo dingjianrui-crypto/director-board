@@ -11,6 +11,12 @@
       "path": "/assets/environments/kitchen/kitchen_mesh.glb",
       "sizeBytes": 551652,
       "fileType": "glb"
+    },
+    "defaults": {
+      "viewpoint": {
+        "eye": [-1.9057, -0.1362, 9.4594],
+        "target": [-1.5351, -0.1019, 8.5312]
+      }
     }
   }
 ]

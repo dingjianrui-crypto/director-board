@@ -54,6 +54,48 @@ test("parses built-in environment manifest entries", () => {
   ]);
 });
 
+test("parses built-in environment viewpoint defaults", () => {
+  const templates = parseBuiltInEnvironmentManifest([
+    {
+      ...validManifest[0],
+      defaults: {
+        viewpoint: {
+          eye: [-1.9057, -0.1362, 9.4594],
+          target: [-1.5351, -0.1019, 8.5312],
+        },
+      },
+    },
+  ]);
+
+  assert.deepEqual(templates[0].defaults, {
+    viewpoint: {
+      eye: [-1.9057, -0.1362, 9.4594],
+      target: [-1.5351, -0.1019, 8.5312],
+    },
+  });
+});
+
+test("rejects invalid built-in environment viewpoint defaults", () => {
+  assert.throws(
+    () =>
+      parseBuiltInEnvironmentManifest([
+        {
+          ...validManifest[0],
+          defaults: {
+            viewpoint: {
+              eye: [-1.9057, -0.1362],
+              target: [-1.5351, -0.1019, 8.5312],
+            },
+          },
+        },
+      ]),
+    (error) =>
+      error instanceof EnvironmentManifestError &&
+      error.code === "invalid-defaults" &&
+      error.details.fieldName === "defaults.viewpoint.eye",
+  );
+});
+
 test("rejects duplicate built-in environment ids", () => {
   assert.throws(
     () => parseBuiltInEnvironmentManifest([...validManifest, ...validManifest]),

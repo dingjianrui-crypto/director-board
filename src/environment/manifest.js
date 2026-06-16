@@ -58,6 +58,7 @@ function normalizeManifestItem(item, index) {
     "collision",
     index,
   );
+  const defaults = normalizeDefaults(item.defaults, index);
 
   return {
     id: item.id,
@@ -65,8 +66,62 @@ function normalizeManifestItem(item, index) {
     source: "built-in",
     splat,
     collision,
-    defaults: item.defaults ?? undefined,
+    defaults,
   };
+}
+
+function normalizeDefaults(defaults, index) {
+  if (defaults === undefined) return undefined;
+
+  if (!defaults || typeof defaults !== "object" || Array.isArray(defaults)) {
+    throw new EnvironmentManifestError(
+      `Manifest entry at index ${index} has invalid defaults.`,
+      "invalid-defaults",
+      { index },
+    );
+  }
+
+  const normalized = { ...defaults };
+  if (Object.hasOwn(defaults, "viewpoint")) {
+    normalized.viewpoint = normalizeViewpoint(defaults.viewpoint, index);
+  }
+
+  return normalized;
+}
+
+function normalizeViewpoint(viewpoint, index) {
+  if (!viewpoint || typeof viewpoint !== "object" || Array.isArray(viewpoint)) {
+    throw new EnvironmentManifestError(
+      `Manifest entry at index ${index} has invalid defaults.viewpoint.`,
+      "invalid-defaults",
+      { index, fieldName: "defaults.viewpoint" },
+    );
+  }
+
+  return {
+    eye: normalizeVector3(viewpoint.eye, "defaults.viewpoint.eye", index),
+    target: normalizeVector3(
+      viewpoint.target,
+      "defaults.viewpoint.target",
+      index,
+    ),
+  };
+}
+
+function normalizeVector3(value, fieldName, index) {
+  if (
+    !Array.isArray(value) ||
+    value.length !== 3 ||
+    value.some((coordinate) => !Number.isFinite(coordinate))
+  ) {
+    throw new EnvironmentManifestError(
+      `Manifest entry at index ${index} has invalid ${fieldName}.`,
+      "invalid-defaults",
+      { index, fieldName },
+    );
+  }
+
+  return [...value];
 }
 
 function normalizeAsset(asset, supportedTypes, fieldName, index) {

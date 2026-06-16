@@ -3,6 +3,7 @@ import {
   Camera,
   Check,
   Clapperboard,
+  Copy,
   Download,
   Eye,
   EyeOff,
@@ -561,7 +562,10 @@ export function App() {
             onStatus={setStatus}
           />
           <div className="viewport-overlays">
-            <ViewpointReadout viewpoint={currentEditorViewpoint} />
+            <ViewpointReadout
+              viewpoint={currentEditorViewpoint}
+              onCopyStatus={setStatus}
+            />
             <div className="view-chip">
               <Grid3X3 size={13} />
               <label>
@@ -980,24 +984,64 @@ function ShotInspector({ shot, camera }: { shot: Shot; camera?: DirectorCamera }
   );
 }
 
-function ViewpointReadout({ viewpoint }: { viewpoint?: EditorViewpoint }) {
+function ViewpointReadout({
+  viewpoint,
+  onCopyStatus,
+}: {
+  viewpoint?: EditorViewpoint;
+  onCopyStatus: (message: string) => void;
+}) {
+  const eyeValue = viewpoint ? formatTuple(viewpoint.eye) : "";
+  const targetValue = viewpoint ? formatTuple(viewpoint.target) : "";
+
   return (
-    <div className="viewpoint-readout">
-      <strong>Viewpoint</strong>
+    <div
+      className="viewpoint-readout"
+      onPointerDown={(event) => event.stopPropagation()}
+    >
+      <div className="viewpoint-head">
+        <strong>Viewpoint</strong>
+      </div>
       {viewpoint ? (
-        <dl>
-          <div>
-            <dt>eye</dt>
-            <dd>{formatTuple(viewpoint.eye)}</dd>
-          </div>
-          <div>
-            <dt>target</dt>
-            <dd>{formatTuple(viewpoint.target)}</dd>
-          </div>
-        </dl>
+        <div className="viewpoint-fields">
+          <CopyableViewpointValue
+            label="eye"
+            value={eyeValue}
+            onCopyStatus={onCopyStatus}
+          />
+          <CopyableViewpointValue
+            label="target"
+            value={targetValue}
+            onCopyStatus={onCopyStatus}
+          />
+        </div>
       ) : (
         <small>waiting</small>
       )}
+    </div>
+  );
+}
+
+function CopyableViewpointValue({
+  label,
+  value,
+  onCopyStatus,
+}: {
+  label: string;
+  value: string;
+  onCopyStatus: (message: string) => void;
+}) {
+  return (
+    <div className="viewpoint-field">
+      <span>{label}</span>
+      <code>{value}</code>
+      <button
+        type="button"
+        aria-label={`Copy viewpoint ${label}`}
+        onClick={() => copyViewpointValue(`viewpoint ${label}`, value, onCopyStatus)}
+      >
+        <Copy size={12} />
+      </button>
     </div>
   );
 }
@@ -1131,6 +1175,39 @@ function degreesToRadians(value: number) {
 
 function formatTuple(tuple: Vector3Tuple) {
   return `[${tuple.map((value) => value.toFixed(4)).join(", ")}]`;
+}
+
+async function copyViewpointValue(
+  label: string,
+  value: string,
+  onCopyStatus: (message: string) => void,
+) {
+  try {
+    await writeClipboardText(value);
+    onCopyStatus(`Copied ${label}`);
+  } catch (error) {
+    onCopyStatus("Copy failed; select the field manually");
+  }
+}
+
+async function writeClipboardText(value: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  document.body.append(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  if (!copied) {
+    throw new Error("Clipboard copy failed.");
+  }
 }
 
 function modelName(model: string, index: number) {

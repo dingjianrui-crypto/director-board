@@ -10,6 +10,12 @@ export const proceduralTemplate: EnvironmentTemplate = {
   id: "template-procedural-kitchen",
   name: "Procedural Kitchen",
   source: "procedural",
+  defaults: {
+    viewpoint: {
+      eye: [4.2124, 3.5025, 10.1708],
+      target: [0.0000, 1.4800, 1.0000],
+    },
+  },
 };
 
 export const starterObjects: BoardObject[] = [

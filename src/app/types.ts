@@ -31,6 +31,7 @@ export type EnvironmentTemplate = {
   };
   defaults?: Partial<{
     transform: EnvironmentTransform;
+    viewpoint: EditorViewpoint;
     visible: boolean;
     opacity: number;
     renderMode: "auto" | "quality" | "balanced" | "fast";

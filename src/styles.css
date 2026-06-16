@@ -319,10 +319,12 @@ h3 {
 }
 
 .viewpoint-readout {
+  pointer-events: auto;
+  user-select: text;
   position: absolute;
   top: 14px;
   left: 14px;
-  width: min(310px, calc(100% - 28px));
+  width: min(380px, calc(100% - 28px));
   padding: 9px 10px;
   border: 1px solid #303847;
   border-radius: 7px;
@@ -332,37 +334,74 @@ h3 {
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.24);
 }
 
-.viewpoint-readout strong {
-  display: block;
-  margin-bottom: 7px;
+.viewpoint-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.viewpoint-head strong {
   color: #edf4ff;
   font-size: 12px;
 }
 
-.viewpoint-readout dl {
+.viewpoint-head button,
+.viewpoint-field button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #344153;
+  border-radius: 5px;
+  background: #1c2531;
+  color: #cbd7e6;
+  cursor: pointer;
+}
+
+.viewpoint-head button:hover,
+.viewpoint-field button:hover {
+  background: #263242;
+  border-color: #45566e;
+}
+
+.viewpoint-head button {
+  gap: 4px;
+  min-height: 23px;
+  padding: 0 7px;
+  font-size: 10px;
+}
+
+.viewpoint-fields {
   display: grid;
   gap: 5px;
-  margin: 0;
 }
 
-.viewpoint-readout dl div {
+.viewpoint-field {
   display: grid;
-  grid-template-columns: 45px minmax(0, 1fr);
-  align-items: baseline;
-  gap: 8px;
+  grid-template-columns: 45px minmax(0, 1fr) 25px;
+  align-items: center;
+  gap: 6px;
 }
 
-.viewpoint-readout dt {
+.viewpoint-field span {
   color: #778292;
 }
 
-.viewpoint-readout dd {
+.viewpoint-field code {
   min-width: 0;
-  margin: 0;
   overflow-wrap: anywhere;
   font-family:
     "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  line-height: 1.35;
   color: #dfe8f4;
+}
+
+.viewpoint-field button {
+  width: 25px;
+  height: 25px;
+  padding: 0;
 }
 
 .viewpoint-readout small {

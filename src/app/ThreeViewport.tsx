@@ -87,7 +87,7 @@ type ObjectDragState = ObjectHandle & {
   offset: THREE.Vector3;
 };
 
-type EnvironmentFrameSource = "splat" | "collision" | "spawn";
+type EnvironmentFrameSource = "splat" | "collision" | "spawn" | "manifest";
 
 type EnvironmentFrameClaim = {
   key: string;
@@ -395,6 +395,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       }
 
       frameEditorCameraAtSparkPhysicsSpawn(root);
+      frameEditorCameraAtManifestViewpoint();
 
       if (template.splat) {
         await loadSplat(root);
@@ -555,6 +556,20 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       };
 
       return frameEditorCameraAtViewpoint(viewpoint, null, "spawn");
+    }
+
+    function frameEditorCameraAtManifestViewpoint() {
+      const viewpoint = latestRef.current.template.defaults?.viewpoint;
+      if (!viewpoint) return false;
+
+      return frameEditorCameraAtViewpoint(
+        {
+          eye: new THREE.Vector3(...viewpoint.eye),
+          target: new THREE.Vector3(...viewpoint.target),
+        },
+        null,
+        "manifest",
+      );
     }
 
     function findWalkableCollisionViewpoint(
@@ -929,6 +944,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
     }
 
     function getEnvironmentFramePriority(source: EnvironmentFrameSource) {
+      if (source === "manifest") return 4;
       if (source === "spawn") return 3;
       return source === "collision" ? 2 : 1;
     }
