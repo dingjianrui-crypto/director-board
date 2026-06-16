@@ -1,0 +1,16 @@
+[
+  {
+    "id": "kitchen",
+    "name": "Kitchen",
+    "splat": {
+      "path": "/assets/environments/kitchen/kitchen_splats.spz",
+      "sizeBytes": 30831768,
+      "fileType": "spz"
+    },
+    "collision": {
+      "path": "/assets/environments/kitchen/kitchen_mesh.glb",
+      "sizeBytes": 551652,
+      "fileType": "glb"
+    }
+  }
+]
