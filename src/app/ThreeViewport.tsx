@@ -11,6 +11,7 @@ import type {
   BoardObject,
   DirectorCamera,
   DirectorScene,
+  EditorViewpoint,
   EnvironmentTemplate,
   Selection,
 } from "./types";
@@ -52,6 +53,8 @@ type Props = {
   showLabels: boolean;
   onSelect: (selection: Selection) => void;
   onUpdateCamera: (cameraId: string, patch: Partial<DirectorCamera>) => void;
+  onUpdateObject: (objectId: string, patch: Partial<BoardObject>) => void;
+  onViewpointChange: (viewpoint: EditorViewpoint) => void;
   onStatus: (message: string) => void;
 };
 
@@ -69,6 +72,19 @@ type CameraDragState = CameraHandle & {
   plane: THREE.Plane;
   offset: THREE.Vector3;
   updateKey: "position" | "lookAt";
+};
+
+type ObjectHandleKind = "floorPlane";
+
+type ObjectHandle = {
+  objectId: string;
+  kind: ObjectHandleKind;
+};
+
+type ObjectDragState = ObjectHandle & {
+  pointerId: number;
+  plane: THREE.Plane;
+  offset: THREE.Vector3;
 };
 
 type EnvironmentFrameSource = "splat" | "collision" | "spawn";
@@ -93,6 +109,7 @@ const HUMAN_MAX_GROUND_DROP = 1;
 const HUMAN_GROUND_RAY_HEADROOM = 0.25;
 const KEYBOARD_NAV_SPEED = 1.4;
 const KEYBOARD_NAV_VERTICAL_LOOK_THRESHOLD = 0.18;
+const DEFAULT_CAPTURE_SIZE = { width: 1440, height: 1080 };
 
 export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
   function ThreeViewport(
@@ -105,6 +122,8 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       showLabels,
       onSelect,
       onUpdateCamera,
+      onUpdateObject,
+      onViewpointChange,
       onStatus,
     },
     ref,
@@ -132,6 +151,12 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
     const pointerRef = useRef(new THREE.Vector2());
     const hoveredHandleRef = useRef<CameraHandle | null>(null);
     const dragStateRef = useRef<CameraDragState | null>(null);
+    const hoveredObjectHandleRef = useRef<ObjectHandle | null>(null);
+    const objectDragStateRef = useRef<ObjectDragState | null>(null);
+    const lastViewpointPublishRef = useRef<{
+      time: number;
+      key: string;
+    } | null>(null);
     const keyboardNavKeysRef = useRef(new Set<string>());
     const framedEnvironmentRef = useRef<{
       key: string;
@@ -147,6 +172,8 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       showLabels,
       onSelect,
       onUpdateCamera,
+      onUpdateObject,
+      onViewpointChange,
       onStatus,
     });
 
@@ -159,6 +186,8 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       showLabels,
       onSelect,
       onUpdateCamera,
+      onUpdateObject,
+      onViewpointChange,
       onStatus,
     };
 
@@ -249,6 +278,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       const onPointerDown = (event: PointerEvent) => {
         updatePointer(event);
         if (startCameraHandleDrag(event)) return;
+        if (startObjectHandleDrag(event)) return;
         pickSelection();
       };
       const onPointerMove = (event: PointerEvent) => {
@@ -257,14 +287,21 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
           dragCameraHandle();
           return;
         }
+        if (objectDragStateRef.current) {
+          dragObjectHandle();
+          return;
+        }
         updateHoveredCameraHandle();
+        updateHoveredObjectHandle();
       };
       const onPointerUp = (event: PointerEvent) => {
         stopCameraHandleDrag(event.pointerId);
+        stopObjectHandleDrag(event.pointerId);
       };
       const onPointerLeave = () => {
-        if (!dragStateRef.current) {
+        if (!dragStateRef.current && !objectDragStateRef.current) {
           setHoveredCameraHandle(null);
+          setHoveredObjectHandle(null);
         }
       };
       const onKeyDown = (event: KeyboardEvent) => {
@@ -295,6 +332,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
         lastFrameTime = frameTime;
         updateKeyboardNavigation(deltaTime);
         controls.update();
+        publishEditorViewpoint(frameTime);
         updateLabelFacing();
         updateCameraHandleFacing();
         void sparkRef.current?.update?.({ scene: threeScene, camera: editorCamera });
@@ -726,6 +764,24 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       controls.target.add(appliedMove);
     }
 
+    function publishEditorViewpoint(frameTime: number) {
+      const camera = editorCameraRef.current;
+      const controls = controlsRef.current;
+      if (!camera || !controls) return;
+
+      const viewpoint: EditorViewpoint = {
+        eye: viewpointVectorToTuple(camera.position),
+        target: viewpointVectorToTuple(controls.target),
+      };
+      const key = `${latestRef.current.scene.id}:${JSON.stringify(viewpoint)}`;
+      const last = lastViewpointPublishRef.current;
+      if (last?.key === key) return;
+      if (last && frameTime - last.time < 120) return;
+
+      lastViewpointPublishRef.current = { time: frameTime, key };
+      latestRef.current.onViewpointChange(viewpoint);
+    }
+
     function getKeyboardNavResolvedPosition(
       currentPosition: THREE.Vector3,
       nextPosition: THREE.Vector3,
@@ -1041,9 +1097,104 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
         ring.rotation.x = Math.PI / 2;
         ring.position.y = 0.035;
         group.add(ring);
+        group.add(createObjectFloorMoveGizmo(object.id));
       }
 
       return group;
+    }
+
+    function createObjectFloorMoveGizmo(objectId: string) {
+      const gizmo = new THREE.Group();
+      gizmo.name = "ObjectFloorMoveGizmo";
+      gizmo.position.y = 0.06;
+      gizmo.userData.objectHandle = { objectId, kind: "floorPlane" };
+
+      const axisLength = 0.86;
+      const headLength = 0.12;
+      const headWidth = 0.055;
+      gizmo.add(
+        new THREE.ArrowHelper(
+          new THREE.Vector3(1, 0, 0),
+          new THREE.Vector3(0, 0, 0),
+          axisLength,
+          0xff4f4f,
+          headLength,
+          headWidth,
+        ),
+      );
+      gizmo.add(
+        new THREE.ArrowHelper(
+          new THREE.Vector3(0, 0, 1),
+          new THREE.Vector3(0, 0, 0),
+          axisLength,
+          0x4a9eff,
+          headLength,
+          headWidth,
+        ),
+      );
+      gizmo.add(createObjectFloorPlaneHandle(objectId));
+      return gizmo;
+    }
+
+    function createObjectFloorPlaneHandle(objectId: string) {
+      const planeSize = 0.34;
+      const planeOffset = planeSize / 2;
+      const handle = new THREE.Group();
+      handle.name = "ObjectFloorPlaneHandle";
+      handle.position.set(planeOffset, 0.01, planeOffset);
+      handle.rotation.x = Math.PI / 2;
+      handle.userData.objectHandle = { objectId, kind: "floorPlane" };
+
+      const hitArea = new THREE.Mesh(
+        new THREE.PlaneGeometry(planeSize * 1.6, planeSize * 1.6),
+        new THREE.MeshBasicMaterial({
+          color: 0xff38d1,
+          transparent: true,
+          opacity: 0,
+          depthTest: false,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        }),
+      );
+      hitArea.name = "ObjectFloorPlaneHitArea";
+      hitArea.userData.objectHandle = { objectId, kind: "floorPlane" };
+      handle.add(hitArea);
+
+      const fill = new THREE.Mesh(
+        new THREE.PlaneGeometry(planeSize, planeSize),
+        new THREE.MeshBasicMaterial({
+          color: 0xff38d1,
+          transparent: true,
+          opacity: 0.34,
+          depthTest: false,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        }),
+      );
+      fill.name = "ObjectFloorPlaneFill";
+      fill.userData.objectHandle = { objectId, kind: "floorPlane" };
+      fill.userData.baseColor = 0xff38d1;
+      fill.userData.hoverColor = 0xffffff;
+      fill.renderOrder = 30;
+      handle.add(fill);
+
+      const outline = new THREE.LineSegments(
+        new THREE.EdgesGeometry(fill.geometry),
+        new THREE.LineBasicMaterial({
+          color: 0xff38d1,
+          transparent: true,
+          opacity: 0.95,
+          depthTest: false,
+        }),
+      );
+      outline.name = "ObjectFloorPlaneOutline";
+      outline.userData.objectHandle = { objectId, kind: "floorPlane" };
+      outline.userData.baseColor = 0xff38d1;
+      outline.userData.hoverColor = 0xffffff;
+      outline.renderOrder = 31;
+      handle.add(outline);
+
+      return handle;
     }
 
     function buildCharacter(
@@ -1619,6 +1770,69 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       updateHoveredCameraHandle();
     }
 
+    function startObjectHandleDrag(event: PointerEvent) {
+      const handle = getObjectHandleHit();
+      if (!handle) return false;
+
+      const renderer = rendererRef.current;
+      if (!renderer) return false;
+
+      const object = latestRef.current.scene.objects.find(
+        (entry) => entry.id === handle.objectId,
+      );
+      if (!object) return false;
+
+      const startPoint = new THREE.Vector3(...object.position);
+      const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(
+        new THREE.Vector3(0, 1, 0),
+        startPoint,
+      );
+      const hitPoint = intersectDragPlane(plane);
+      if (!hitPoint) return false;
+
+      objectDragStateRef.current = {
+        ...handle,
+        pointerId: event.pointerId,
+        plane,
+        offset: startPoint.clone().sub(hitPoint),
+      };
+      latestRef.current.onSelect({ type: "object", id: handle.objectId });
+      setHoveredObjectHandle(handle);
+      renderer.domElement.setPointerCapture(event.pointerId);
+      renderer.domElement.style.cursor = "grabbing";
+      if (controlsRef.current) {
+        controlsRef.current.enabled = false;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      return true;
+    }
+
+    function dragObjectHandle() {
+      const dragState = objectDragStateRef.current;
+      if (!dragState) return;
+      const hitPoint = intersectDragPlane(dragState.plane);
+      if (!hitPoint) return;
+      const nextPoint = hitPoint.add(dragState.offset);
+      latestRef.current.onUpdateObject(dragState.objectId, {
+        position: vectorToTuple(nextPoint),
+      });
+    }
+
+    function stopObjectHandleDrag(pointerId: number) {
+      const dragState = objectDragStateRef.current;
+      if (!dragState || dragState.pointerId !== pointerId) return;
+      const renderer = rendererRef.current;
+      if (renderer?.domElement.hasPointerCapture(pointerId)) {
+        renderer.domElement.releasePointerCapture(pointerId);
+      }
+      objectDragStateRef.current = null;
+      if (controlsRef.current) {
+        controlsRef.current.enabled = true;
+      }
+      updateHoveredObjectHandle();
+    }
+
     function intersectDragPlane(plane: THREE.Plane) {
       const editorCamera = editorCameraRef.current;
       if (!editorCamera) return undefined;
@@ -1631,13 +1845,21 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       setHoveredCameraHandle(getCameraHandleHit());
     }
 
+    function updateHoveredObjectHandle() {
+      setHoveredObjectHandle(getObjectHandleHit());
+    }
+
     function setHoveredCameraHandle(handle: CameraHandle | null) {
       hoveredHandleRef.current = handle;
       const renderer = rendererRef.current;
       const cameraRoot = cameraRootRef.current;
-      if (renderer && !dragStateRef.current) {
+      if (renderer && !dragStateRef.current && !objectDragStateRef.current) {
         renderer.domElement.style.cursor =
-          handle?.kind === "axisPlane" ? "pointer" : "";
+          handle?.kind === "axisPlane"
+            ? "pointer"
+            : hoveredObjectHandleRef.current
+              ? "pointer"
+              : "";
       }
       if (!cameraRoot) return;
       cameraRoot.traverse((child) => {
@@ -1665,6 +1887,39 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
           material.needsUpdate = true;
         }
         if (child.name === "CameraAxisPlaneOutline") {
+          const line = child as THREE.LineSegments;
+          const material = line.material as THREE.LineBasicMaterial;
+          material.color.setHex(hovered ? line.userData.hoverColor : line.userData.baseColor);
+          material.opacity = hovered ? 1 : 0.95;
+          material.needsUpdate = true;
+        }
+      });
+    }
+
+    function setHoveredObjectHandle(handle: ObjectHandle | null) {
+      hoveredObjectHandleRef.current = handle;
+      const renderer = rendererRef.current;
+      const objectRoot = objectRootRef.current;
+      if (renderer && !dragStateRef.current && !objectDragStateRef.current) {
+        renderer.domElement.style.cursor = handle
+          ? "pointer"
+          : hoveredHandleRef.current?.kind === "axisPlane"
+            ? "pointer"
+            : "";
+      }
+      if (!objectRoot) return;
+      objectRoot.traverse((child) => {
+        const owner = findObjectHandle(child);
+        const hovered = !!owner && !!handle && objectHandlesMatch(owner, handle);
+
+        if (child.name === "ObjectFloorPlaneFill") {
+          const mesh = child as THREE.Mesh;
+          const material = mesh.material as THREE.MeshBasicMaterial;
+          material.color.setHex(hovered ? mesh.userData.hoverColor : mesh.userData.baseColor);
+          material.opacity = hovered ? 0.68 : 0.34;
+          material.needsUpdate = true;
+        }
+        if (child.name === "ObjectFloorPlaneOutline") {
           const line = child as THREE.LineSegments;
           const material = line.material as THREE.LineBasicMaterial;
           material.color.setHex(hovered ? line.userData.hoverColor : line.userData.baseColor);
@@ -1703,11 +1958,58 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       return null;
     }
 
+    function getObjectHandleHit(): ObjectHandle | null {
+      const editorCamera = editorCameraRef.current;
+      const objectRoot = objectRootRef.current;
+      if (!editorCamera || !objectRoot) return null;
+
+      raycasterRef.current.setFromCamera(pointerRef.current, editorCamera);
+      const hitAreas: THREE.Object3D[] = [];
+      objectRoot.traverse((child) => {
+        if (child.name === "ObjectFloorPlaneHitArea") {
+          hitAreas.push(child);
+        }
+      });
+      const hits = raycasterRef.current.intersectObjects(hitAreas, false);
+      if (hits[0]) return findObjectHandle(hits[0].object);
+
+      if (latestRef.current.selection.type !== "object") return null;
+
+      const selectedObjectHits = raycasterRef.current.intersectObjects(
+        objectRoot.children,
+        true,
+      );
+      for (const hit of selectedObjectHits) {
+        const selection = findSelection(hit.object) as Selection | undefined;
+        if (
+          selection?.type === "object" &&
+          selection.id === latestRef.current.selection.id
+        ) {
+          return {
+            objectId: selection.id,
+            kind: "floorPlane",
+          };
+        }
+      }
+      return null;
+    }
+
     function findCameraHandle(object: THREE.Object3D): CameraHandle | null {
       let current: THREE.Object3D | null = object;
       while (current) {
         if (current.userData.cameraHandle) {
           return current.userData.cameraHandle as CameraHandle;
+        }
+        current = current.parent;
+      }
+      return null;
+    }
+
+    function findObjectHandle(object: THREE.Object3D): ObjectHandle | null {
+      let current: THREE.Object3D | null = object;
+      while (current) {
+        if (current.userData.objectHandle) {
+          return current.userData.objectHandle as ObjectHandle;
         }
         current = current.parent;
       }
@@ -1720,6 +2022,10 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
         a.kind === b.kind &&
         a.axisPlane === b.axisPlane
       );
+    }
+
+    function objectHandlesMatch(a: ObjectHandle, b: ObjectHandle) {
+      return a.objectId === b.objectId && a.kind === b.kind;
     }
 
     function getCameraAxisPlaneNormal(axisPlane: CameraAxisPlane) {
@@ -1807,8 +2113,9 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
 
       const oldSize = new THREE.Vector2();
       renderer.getSize(oldSize);
-      const width = options.width ?? 480;
-      const height = options.height ?? 270;
+      const oldPixelRatio = renderer.getPixelRatio();
+      const width = options.width ?? DEFAULT_CAPTURE_SIZE.width;
+      const height = options.height ?? DEFAULT_CAPTURE_SIZE.height;
       const camera = createPerspectiveFromDirectorCamera(directorCamera, width / height);
 
       const collisionVisible = collisionMeshRef.current?.visible ?? false;
@@ -1827,9 +2134,11 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       if (gridRef.current) {
         gridRef.current.visible = false;
       }
+      renderer.setPixelRatio(1);
       renderer.setSize(width, height, false);
       renderer.render(threeScene, camera);
       const dataUrl = renderer.domElement.toDataURL("image/png");
+      renderer.setPixelRatio(oldPixelRatio);
       renderer.setSize(oldSize.x, oldSize.y, false);
       if (collisionMeshRef.current) {
         collisionMeshRef.current.visible = collisionVisible;
@@ -1986,6 +2295,19 @@ function getHorizontalEdgePenalty(point: THREE.Vector3, box: THREE.Box3) {
   const edgeRatio = Math.min(xEdgeRatio, zEdgeRatio);
 
   return edgeRatio < 0.08 ? 0.35 : 0;
+}
+
+function viewpointVectorToTuple(vector: THREE.Vector3): EditorViewpoint["eye"] {
+  return [
+    roundViewpointNumber(vector.x),
+    roundViewpointNumber(vector.y),
+    roundViewpointNumber(vector.z),
+  ];
+}
+
+function roundViewpointNumber(value: number) {
+  const rounded = Number(value.toFixed(4));
+  return Object.is(rounded, -0) ? 0 : rounded;
 }
 
 function clamp(value: number, min: number, max: number) {

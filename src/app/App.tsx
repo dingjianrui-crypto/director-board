@@ -34,6 +34,7 @@ import type {
   BoardObjectKind,
   DirectorCamera,
   DirectorScene,
+  EditorViewpoint,
   EnvironmentTransform,
   EnvironmentTemplate,
   Selection,
@@ -51,6 +52,7 @@ const DEFAULT_SCAN_TRANSFORM: EnvironmentTransform = {
   scale: 1,
 };
 const BUILT_IN_ENVIRONMENT_MANIFEST_PATH = "/assets/environments/manifest.json";
+const SHOT_CAPTURE_SIZE = { width: 1440, height: 1080 };
 
 const orientationPresets = [
   { label: "Spark", rotation: [0, 0, 0] },
@@ -70,6 +72,10 @@ export function App() {
   const [showGrid, setShowGrid] = useState(true);
   const [showLabels, setShowLabels] = useState(true);
   const [previewImage, setPreviewImage] = useState<string | undefined>();
+  const [editorViewpoint, setEditorViewpoint] = useState<{
+    sceneId: string;
+    viewpoint: EditorViewpoint;
+  }>();
   const [status, setStatus] = useState("Ready");
 
   useEffect(() => {
@@ -133,6 +139,10 @@ export function App() {
   const selectedShot =
     selection.type === "shot"
       ? activeScene.shots.find((shot) => shot.id === selection.id)
+      : undefined;
+  const currentEditorViewpoint =
+    editorViewpoint?.sceneId === activeScene.id
+      ? editorViewpoint.viewpoint
       : undefined;
 
   const environmentLibraryLabel = useMemo(
@@ -376,7 +386,7 @@ export function App() {
       return;
     }
 
-    const thumbnail = viewportRef.current?.capture(camera.id);
+    const thumbnail = viewportRef.current?.capture(camera.id, SHOT_CAPTURE_SIZE);
     const shot: Shot = {
       id: `shot-${Date.now().toString(36)}`,
       name: `Shot ${activeScene.shots.length + 1}`,
@@ -390,6 +400,19 @@ export function App() {
     updateScene((scene) => ({ ...scene, shots: [...scene.shots, shot] }));
     setSelection({ type: "shot", id: shot.id });
     setStatus(`Captured ${shot.name}`);
+  }
+
+  function downloadShot(shot: Shot) {
+    if (!shot.thumbnail) {
+      setStatus(`${shot.name} has no image to download.`);
+      return;
+    }
+
+    const link = document.createElement("a");
+    link.href = shot.thumbnail;
+    link.download = `${shot.name.toLowerCase().replace(/[^a-z0-9]+/g, "-") || "shot"}.png`;
+    link.click();
+    setStatus(`Downloaded ${shot.name}`);
   }
 
   return (
@@ -528,9 +551,17 @@ export function App() {
             showLabels={showLabels}
             onSelect={setSelection}
             onUpdateCamera={updateCamera}
+            onUpdateObject={updateObject}
+            onViewpointChange={(viewpoint) =>
+              setEditorViewpoint({
+                sceneId: activeScene.id,
+                viewpoint,
+              })
+            }
             onStatus={setStatus}
           />
           <div className="viewport-overlays">
+            <ViewpointReadout viewpoint={currentEditorViewpoint} />
             <div className="view-chip">
               <Grid3X3 size={13} />
               <label>
@@ -580,20 +611,46 @@ export function App() {
         </div>
         <div className="shot-list">
           {activeScene.shots.map((shot, index) => (
-            <button
+            <div
               key={shot.id}
+              role="button"
+              tabIndex={0}
               className={`shot-card ${selection.type === "shot" && selection.id === shot.id ? "selected" : ""}`}
               onClick={() => setSelection({ type: "shot", id: shot.id })}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter" && event.key !== " ") return;
+                event.preventDefault();
+                setSelection({ type: "shot", id: shot.id });
+              }}
             >
               <span className="shot-number">{index + 1}</span>
               {shot.thumbnail ? (
-                <img src={shot.thumbnail} alt="" />
+                <span className="shot-image-wrap">
+                  <img src={shot.thumbnail} alt="" />
+                  <button
+                    type="button"
+                    aria-label={`Download ${shot.name}`}
+                    className="shot-download"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      downloadShot(shot);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key !== "Enter" && event.key !== " ") return;
+                      event.preventDefault();
+                      event.stopPropagation();
+                      downloadShot(shot);
+                    }}
+                  >
+                    <Download size={13} />
+                  </button>
+                </span>
               ) : (
                 <span className="shot-placeholder"><Video size={22} /></span>
               )}
               <strong>{shot.name}</strong>
               <small>{shot.frame} · {shot.lens}mm · {shot.duration}</small>
-            </button>
+            </div>
           ))}
         </div>
         <span className="status">{status}</span>
@@ -923,6 +980,28 @@ function ShotInspector({ shot, camera }: { shot: Shot; camera?: DirectorCamera }
   );
 }
 
+function ViewpointReadout({ viewpoint }: { viewpoint?: EditorViewpoint }) {
+  return (
+    <div className="viewpoint-readout">
+      <strong>Viewpoint</strong>
+      {viewpoint ? (
+        <dl>
+          <div>
+            <dt>eye</dt>
+            <dd>{formatTuple(viewpoint.eye)}</dd>
+          </div>
+          <div>
+            <dt>target</dt>
+            <dd>{formatTuple(viewpoint.target)}</dd>
+          </div>
+        </dl>
+      ) : (
+        <small>waiting</small>
+      )}
+    </div>
+  );
+}
+
 function CameraPreview({
   camera,
   previewImage,
@@ -1048,6 +1127,10 @@ function radiansToDegrees(value: number) {
 
 function degreesToRadians(value: number) {
   return (value * Math.PI) / 180;
+}
+
+function formatTuple(tuple: Vector3Tuple) {
+  return `[${tuple.map((value) => value.toFixed(4)).join(", ")}]`;
 }
 
 function modelName(model: string, index: number) {

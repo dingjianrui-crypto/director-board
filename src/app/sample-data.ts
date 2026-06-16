@@ -15,7 +15,7 @@ export const proceduralTemplate: EnvironmentTemplate = {
 export const starterObjects: BoardObject[] = [
   {
     id: "obj-maya",
-    name: "Maya",
+    name: "Actor1",
     kind: "character",
     model: "standing",
     color: "#d86b4d",
@@ -25,7 +25,7 @@ export const starterObjects: BoardObject[] = [
   },
   {
     id: "obj-dan",
-    name: "Dan",
+    name: "Actor2",
     kind: "character",
     model: "seated",
     color: "#2f84d7",

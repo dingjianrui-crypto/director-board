@@ -318,6 +318,57 @@ h3 {
   inset: 0;
 }
 
+.viewpoint-readout {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  width: min(310px, calc(100% - 28px));
+  padding: 9px 10px;
+  border: 1px solid #303847;
+  border-radius: 7px;
+  background: rgba(16, 20, 27, 0.88);
+  color: #b7c1ce;
+  font-size: 11px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.24);
+}
+
+.viewpoint-readout strong {
+  display: block;
+  margin-bottom: 7px;
+  color: #edf4ff;
+  font-size: 12px;
+}
+
+.viewpoint-readout dl {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+}
+
+.viewpoint-readout dl div {
+  display: grid;
+  grid-template-columns: 45px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 8px;
+}
+
+.viewpoint-readout dt {
+  color: #778292;
+}
+
+.viewpoint-readout dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-family:
+    "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  color: #dfe8f4;
+}
+
+.viewpoint-readout small {
+  color: #7f8a9a;
+}
+
 .view-chip {
   pointer-events: auto;
   position: absolute;
@@ -544,13 +595,46 @@ h3 {
   box-shadow: inset 0 0 0 1px rgba(61, 140, 255, 0.45);
 }
 
-.shot-card img,
+.shot-image-wrap,
 .shot-placeholder {
   width: 100%;
   height: 62px;
-  object-fit: cover;
   border-radius: 4px;
   background: #1d2530;
+}
+
+.shot-image-wrap {
+  position: relative;
+  display: block;
+  overflow: hidden;
+}
+
+.shot-card img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.shot-download {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid rgba(214, 226, 241, 0.28);
+  border-radius: 5px;
+  background: rgba(13, 18, 25, 0.86);
+  color: #eaf3ff;
+}
+
+.shot-download:hover,
+.shot-download:focus-visible {
+  background: #285dae;
+  border-color: #5f95e6;
+  outline: none;
 }
 
 .shot-placeholder {
