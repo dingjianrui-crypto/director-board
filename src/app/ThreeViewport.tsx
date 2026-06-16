@@ -12,7 +12,6 @@ import type {
   DirectorCamera,
   DirectorScene,
   EditorViewpoint,
-  EnvironmentTemplate,
   Selection,
 } from "./types";
 
@@ -46,7 +45,6 @@ export type ThreeViewportHandle = {
 
 type Props = {
   scene: DirectorScene;
-  template: EnvironmentTemplate;
   selection: Selection;
   selectedCameraId?: string;
   showGrid: boolean;
@@ -87,9 +85,9 @@ type ObjectDragState = ObjectHandle & {
   offset: THREE.Vector3;
 };
 
-type EnvironmentFrameSource = "splat" | "collision" | "spawn" | "manifest";
+type SceneFrameSource = "splat" | "collision" | "spawn" | "manifest";
 
-type EnvironmentFrameClaim = {
+type SceneFrameClaim = {
   key: string;
   priority: number;
 };
@@ -99,7 +97,7 @@ type Viewpoint = {
   target: THREE.Vector3;
 };
 
-const SCAN_ENVIRONMENT_SCALE = 3;
+const SCAN_SCENE_SCALE = 3;
 const SPARK_PHYSICS_SPAWN_EYE = new THREE.Vector3(0, 1.48, 0);
 const SPARK_PHYSICS_SPAWN_TARGET = new THREE.Vector3(0, 1.48, 1);
 const HUMAN_EYE_HEIGHT = 1.55;
@@ -115,7 +113,6 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
   function ThreeViewport(
     {
       scene,
-      template,
       selection,
       selectedCameraId,
       showGrid,
@@ -134,7 +131,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
     const editorCameraRef = useRef<THREE.PerspectiveCamera | null>(null);
     const controlsRef = useRef<OrbitControls | null>(null);
     const gridRef = useRef<THREE.GridHelper | null>(null);
-    const environmentRootRef = useRef<THREE.Group | null>(null);
+    const sceneWorldRootRef = useRef<THREE.Group | null>(null);
     const objectRootRef = useRef<THREE.Group | null>(null);
     const cameraRootRef = useRef<THREE.Group | null>(null);
     const labelRootRef = useRef<THREE.Group | null>(null);
@@ -158,14 +155,13 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       key: string;
     } | null>(null);
     const keyboardNavKeysRef = useRef(new Set<string>());
-    const framedEnvironmentRef = useRef<{
+    const framedSceneRef = useRef<{
       key: string;
       priority: number;
     } | null>(null);
 
     const latestRef = useRef({
       scene,
-      template,
       selection,
       selectedCameraId,
       showGrid,
@@ -179,7 +175,6 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
 
     latestRef.current = {
       scene,
-      template,
       selection,
       selectedCameraId,
       showGrid,
@@ -240,9 +235,9 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       grid.position.y = 0;
       threeScene.add(grid);
 
-      const environmentRoot = new THREE.Group();
-      environmentRoot.name = "EnvironmentRoot";
-      threeScene.add(environmentRoot);
+      const sceneWorldRoot = new THREE.Group();
+      sceneWorldRoot.name = "SceneWorldRoot";
+      threeScene.add(sceneWorldRoot);
       const objectRoot = new THREE.Group();
       objectRoot.name = "Objects";
       threeScene.add(objectRoot);
@@ -258,7 +253,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       editorCameraRef.current = editorCamera;
       controlsRef.current = controls;
       gridRef.current = grid;
-      environmentRootRef.current = environmentRoot;
+      sceneWorldRootRef.current = sceneWorldRoot;
       objectRootRef.current = objectRoot;
       cameraRootRef.current = cameraRoot;
       labelRootRef.current = labelRoot;
@@ -364,12 +359,12 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
     }, [showGrid, showLabels]);
 
     useEffect(() => {
-      void rebuildEnvironment();
-    }, [scene.environment, template.id]);
+      void rebuildSceneWorld();
+    }, [scene.world, scene.assets.id]);
 
     useEffect(() => {
-      alignGridToEnvironmentGround(environmentRootRef.current);
-    }, [scene.environment.gridY, scene.environment.transform.position]);
+      alignGridToSceneGround(sceneWorldRootRef.current);
+    }, [scene.world.gridY, scene.world.transform.position]);
 
     useEffect(() => {
       rebuildObjects();
@@ -377,8 +372,8 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       rebuildLabels();
     }, [scene.objects, scene.cameras, selection, showLabels]);
 
-    async function rebuildEnvironment() {
-      const root = environmentRootRef.current;
+    async function rebuildSceneWorld() {
+      const root = sceneWorldRootRef.current;
       if (!root) return;
 
       clearGroup(root);
@@ -387,23 +382,23 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       collisionMeshRef.current = null;
       autoGridYRef.current = null;
 
-      applyEnvironmentTransform(root);
-      alignGridToEnvironmentGround(root);
+      applySceneWorldTransform(root);
+      alignGridToSceneGround(root);
 
-      if (!scene.environment.visible) {
+      if (!scene.world.visible) {
         return;
       }
 
       frameEditorCameraAtSparkPhysicsSpawn(root);
       frameEditorCameraAtManifestViewpoint();
 
-      if (template.splat) {
+      if (scene.assets.splat) {
         await loadSplat(root);
       } else {
         buildProceduralKitchen(root);
       }
 
-      if (template.collision) {
+      if (scene.assets.collision) {
         await loadCollisionMesh(root);
       } else {
         const collision = buildProceduralCollision();
@@ -412,10 +407,10 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       }
     }
 
-    function applyEnvironmentTransform(root: THREE.Object3D) {
-      const { position, rotation, scale } = latestRef.current.scene.environment.transform;
+    function applySceneWorldTransform(root: THREE.Object3D) {
+      const { position, rotation, scale } = latestRef.current.scene.world.transform;
       root.position.set(position[0], position[1], position[2]);
-      const effectiveRotation = getEffectiveEnvironmentRotation(rotation);
+      const effectiveRotation = getEffectiveSceneWorldRotation(rotation);
       root.rotation.set(
         effectiveRotation[0],
         effectiveRotation[1],
@@ -424,11 +419,11 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       root.scale.setScalar(scale);
     }
 
-    function getEffectiveEnvironmentRotation(
+    function getEffectiveSceneWorldRotation(
       rotation: [number, number, number],
     ): [number, number, number] {
       const hasLegacyRootFlip =
-        latestRef.current.template.source === "upload" &&
+        latestRef.current.scene.assets.source === "upload" &&
         Math.abs(rotation[0] - Math.PI) < 0.0001 &&
         Math.abs(rotation[1]) < 0.0001 &&
         Math.abs(rotation[2]) < 0.0001;
@@ -461,21 +456,21 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
 
     async function loadSplat(root: THREE.Group) {
       const ok = await ensureSpark();
-      if (!ok || !template.splat) {
+      if (!ok || !scene.assets.splat) {
         buildProceduralKitchen(root);
         return;
       }
 
       try {
         const sparkModule = (await import("@sparkjsdev/spark")) as unknown as SparkModule;
-        const mode = latestRef.current.scene.environment.renderMode;
+        const mode = latestRef.current.scene.world.renderMode;
         const splat = new sparkModule.SplatMesh({
-          url: template.splat.objectUrl ?? template.splat.path,
-          fileName: template.splat.path,
-          fileType: template.splat.fileType,
+          url: scene.assets.splat.objectUrl ?? scene.assets.splat.path,
+          fileName: scene.assets.splat.path,
+          fileType: scene.assets.splat.fileType,
           raycastable: false,
           lod: mode !== "quality",
-          paged: template.splat.fileType === "rad",
+          paged: scene.assets.splat.fileType === "rad",
           onProgress: (event: ProgressEvent) => {
             if (event.lengthComputable) {
               const percent = Math.round((event.loaded / event.total) * 100);
@@ -484,9 +479,9 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
               latestRef.current.onStatus("Loading splat");
             }
           },
-          onLoad: () => latestRef.current.onStatus("Environment splat ready"),
+          onLoad: () => latestRef.current.onStatus("Scene splat ready"),
         });
-        splat.opacity = latestRef.current.scene.environment.opacity;
+        splat.opacity = latestRef.current.scene.world.opacity;
         applySplatCoordinateFix(splat);
         root.add(splat);
         splatMeshRef.current = splat;
@@ -503,7 +498,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       splat: THREE.Object3D & { getBoundingBox?: (centersOnly?: boolean) => THREE.Box3 },
     ) {
       for (let attempt = 0; attempt < 10; attempt += 1) {
-        if (environmentRootRef.current !== root || splatMeshRef.current !== splat) return;
+        if (sceneWorldRootRef.current !== root || splatMeshRef.current !== splat) return;
         if (frameEditorCameraInsideSplat(root, splat)) return;
         await waitForFrame(80);
       }
@@ -528,7 +523,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
 
     function frameEditorCameraInsideObject(
       object: THREE.Object3D,
-      source: EnvironmentFrameSource,
+      source: SceneFrameSource,
     ) {
       object.updateWorldMatrix(true, true);
       const bounds = new THREE.Box3().setFromObject(object);
@@ -545,7 +540,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
     }
 
     function frameEditorCameraAtSparkPhysicsSpawn(root: THREE.Object3D) {
-      if (latestRef.current.template.source === "procedural" || !latestRef.current.template.splat) {
+      if (latestRef.current.scene.assets.source === "procedural" || !latestRef.current.scene.assets.splat) {
         return false;
       }
 
@@ -559,7 +554,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
     }
 
     function frameEditorCameraAtManifestViewpoint() {
-      const viewpoint = latestRef.current.template.defaults?.viewpoint;
+      const viewpoint = latestRef.current.scene.assets.defaults?.viewpoint;
       if (!viewpoint) return false;
 
       return frameEditorCameraAtViewpoint(
@@ -647,7 +642,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
         });
 
         autoGridYRef.current = best.point.y;
-        alignGridToEnvironmentGround(environmentRootRef.current);
+        alignGridToSceneGround(sceneWorldRootRef.current);
 
         return createViewpointFromFloorPoint(best.point, bounds);
       } finally {
@@ -659,13 +654,13 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
 
     function frameEditorCameraInsideBounds(
       bounds: THREE.Box3,
-      source: EnvironmentFrameSource,
+      source: SceneFrameSource,
     ) {
       const editorCamera = editorCameraRef.current;
       const controls = controlsRef.current;
       if (!editorCamera || !controls) return false;
 
-      const claim = claimEnvironmentFrame(source);
+      const claim = claimSceneFrame(source);
       if (!claim) return false;
 
       const center = bounds.getCenter(new THREE.Vector3());
@@ -695,20 +690,20 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       editorCamera.updateProjectionMatrix();
       controls.target.copy(target);
       controls.update();
-      framedEnvironmentRef.current = claim;
+      framedSceneRef.current = claim;
       return true;
     }
 
     function frameEditorCameraAtViewpoint(
       viewpoint: Viewpoint,
       bounds: THREE.Box3 | null,
-      source: EnvironmentFrameSource,
+      source: SceneFrameSource,
     ) {
       const editorCamera = editorCameraRef.current;
       const controls = controlsRef.current;
       if (!editorCamera || !controls) return false;
 
-      const claim = claimEnvironmentFrame(source);
+      const claim = claimSceneFrame(source);
       if (!claim) return false;
 
       const size = bounds?.getSize(new THREE.Vector3()) ?? new THREE.Vector3(12, 4, 12);
@@ -719,15 +714,15 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       editorCamera.updateProjectionMatrix();
       controls.target.copy(viewpoint.target);
       controls.update();
-      framedEnvironmentRef.current = claim;
+      framedSceneRef.current = claim;
       return true;
     }
 
-    function alignGridToEnvironmentGround(root: THREE.Object3D | null) {
+    function alignGridToSceneGround(root: THREE.Object3D | null) {
       if (!gridRef.current) return;
 
       gridRef.current.position.y =
-        latestRef.current.scene.environment.gridY ??
+        latestRef.current.scene.world.gridY ??
         autoGridYRef.current ??
         root?.position.y ??
         0;
@@ -802,7 +797,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       nextPosition: THREE.Vector3,
       preserveVerticalLook: boolean,
     ) {
-      if (!latestRef.current.template.splat || !collisionMeshRef.current) {
+      if (!latestRef.current.scene.assets.splat || !collisionMeshRef.current) {
         return nextPosition;
       }
       if (hasKeyboardNavWallCollision(currentPosition, nextPosition)) return null;
@@ -928,14 +923,14 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       );
     }
 
-    function claimEnvironmentFrame(
-      source: EnvironmentFrameSource,
-    ): EnvironmentFrameClaim | null {
-      const key = `${latestRef.current.scene.id}:${latestRef.current.template.id}`;
-      const priority = getEnvironmentFramePriority(source);
+    function claimSceneFrame(
+      source: SceneFrameSource,
+    ): SceneFrameClaim | null {
+      const key = `${latestRef.current.scene.id}:${latestRef.current.scene.assets.id}`;
+      const priority = getSceneFramePriority(source);
       if (
-        framedEnvironmentRef.current?.key === key &&
-        framedEnvironmentRef.current.priority >= priority
+        framedSceneRef.current?.key === key &&
+        framedSceneRef.current.priority >= priority
       ) {
         return null;
       }
@@ -943,17 +938,17 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       return { key, priority };
     }
 
-    function getEnvironmentFramePriority(source: EnvironmentFrameSource) {
+    function getSceneFramePriority(source: SceneFrameSource) {
       if (source === "manifest") return 4;
       if (source === "spawn") return 3;
       return source === "collision" ? 2 : 1;
     }
 
     async function loadCollisionMesh(root: THREE.Group) {
-      if (!template.collision) return;
+      if (!scene.assets.collision) return;
 
       const loader = new GLTFLoader();
-      const url = template.collision.objectUrl ?? template.collision.path;
+      const url = scene.assets.collision.objectUrl ?? scene.assets.collision.path;
 
       try {
         const gltf = await loader.loadAsync(url);
@@ -964,7 +959,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
           const mesh = node as THREE.Mesh;
           if (!mesh.isMesh) return;
           mesh.userData.collision = true;
-          mesh.visible = latestRef.current.scene.environment.collision.visibleInEditor;
+          mesh.visible = latestRef.current.scene.world.collision.visibleInEditor;
           mesh.material = createCollisionMaterial();
         });
         root.add(collision);
@@ -1037,7 +1032,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       );
       collision.name = "CollisionFloor";
       collision.position.set(0, 0.01, 0.4);
-      collision.visible = latestRef.current.scene.environment.collision.visibleInEditor;
+      collision.visible = latestRef.current.scene.world.collision.visibleInEditor;
       collision.userData.collision = true;
       return collision;
     }
@@ -1049,32 +1044,32 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
         opacity: 0.24,
         side: THREE.DoubleSide,
         wireframe:
-          latestRef.current.scene.environment.collision.displayMode === "wireframe",
+          latestRef.current.scene.world.collision.displayMode === "wireframe",
         depthWrite: false,
       });
     }
 
     function applySplatCoordinateFix(splat: THREE.Object3D) {
-      if (!usesScanEnvironmentCoordinateFix()) return;
+      if (!usesScanSceneCoordinateFix()) return;
 
-      applyScanEnvironmentCoordinateFix(splat);
+      applyScanSceneCoordinateFix(splat);
     }
 
     function applyCollisionCoordinateFix(collision: THREE.Object3D) {
-      if (!usesScanEnvironmentCoordinateFix()) return;
+      if (!usesScanSceneCoordinateFix()) return;
 
-      applyScanEnvironmentCoordinateFix(collision);
+      applyScanSceneCoordinateFix(collision);
     }
 
-    function usesScanEnvironmentCoordinateFix() {
-      return latestRef.current.template.source !== "procedural";
+    function usesScanSceneCoordinateFix() {
+      return latestRef.current.scene.assets.source !== "procedural";
     }
 
-    function applyScanEnvironmentCoordinateFix(object: THREE.Object3D) {
+    function applyScanSceneCoordinateFix(object: THREE.Object3D) {
       object.scale.set(
-        SCAN_ENVIRONMENT_SCALE,
-        -SCAN_ENVIRONMENT_SCALE,
-        SCAN_ENVIRONMENT_SCALE,
+        SCAN_SCENE_SCALE,
+        -SCAN_SCENE_SCALE,
+        SCAN_SCENE_SCALE,
       );
     }
 

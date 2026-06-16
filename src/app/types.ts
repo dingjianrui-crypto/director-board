@@ -5,32 +5,30 @@ export type EditorViewpoint = {
   target: Vector3Tuple;
 };
 
-export type EnvironmentTransform = {
+export type SceneTransform = {
   position: Vector3Tuple;
   rotation: Vector3Tuple;
   scale: number;
 };
 
-export type EnvironmentTemplate = {
+export type SceneAsset = {
+  path: string;
+  sizeBytes: number;
+  fileType: string;
+  objectUrl?: string;
+  file?: File;
+};
+
+export type SceneAssetSource = "blank" | "built-in" | "upload" | "procedural";
+
+export type SceneAssets = {
   id: string;
   name: string;
-  source: "built-in" | "upload" | "procedural";
-  splat?: {
-    path: string;
-    sizeBytes: number;
-    fileType: string;
-    objectUrl?: string;
-    file?: File;
-  };
-  collision?: {
-    path: string;
-    sizeBytes: number;
-    fileType: string;
-    objectUrl?: string;
-    file?: File;
-  };
+  source: SceneAssetSource;
+  splat?: SceneAsset;
+  collision?: SceneAsset;
   defaults?: Partial<{
-    transform: EnvironmentTransform;
+    transform: SceneTransform;
     viewpoint: EditorViewpoint;
     visible: boolean;
     opacity: number;
@@ -43,9 +41,8 @@ export type EnvironmentTemplate = {
   }>;
 };
 
-export type SceneEnvironment = {
-  templateId: string;
-  transform: EnvironmentTransform;
+export type SceneWorld = {
+  transform: SceneTransform;
   visible: boolean;
   opacity: number;
   renderMode: "auto" | "quality" | "balanced" | "fast";
@@ -55,6 +52,8 @@ export type SceneEnvironment = {
     displayMode: "hidden" | "wireframe" | "transparent" | "walkable";
   };
 };
+
+export type SceneOrigin = "draft" | "built-in" | "user";
 
 export type BoardObjectKind = "character" | "prop";
 
@@ -93,14 +92,17 @@ export type DirectorScene = {
   id: string;
   name: string;
   slug: string;
-  environment: SceneEnvironment;
+  origin: SceneOrigin;
+  builtInId?: string;
+  assets: SceneAssets;
+  world: SceneWorld;
   objects: BoardObject[];
   cameras: DirectorCamera[];
   shots: Shot[];
 };
 
 export type Selection =
-  | { type: "environment" }
+  | { type: "scene" }
   | { type: "object"; id: string }
   | { type: "camera"; id: string }
   | { type: "shot"; id: string };

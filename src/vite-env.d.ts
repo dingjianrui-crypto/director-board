@@ -1,13 +1,13 @@
 /// <reference types="vite/client" />
 
-declare module "./environment/index.js" {
-  export const DEFAULT_MAX_ENVIRONMENT_FILE_SIZE_BYTES: number;
+declare module "./scene/index.js" {
+  export const DEFAULT_MAX_SCENE_FILE_SIZE_BYTES: number;
   export const DEFAULT_PLACEMENT_MAX_SLOPE_DEGREES: number;
-  export class EnvironmentValidationError extends Error {
+  export class SceneValidationError extends Error {
     code: string;
     details: Record<string, unknown>;
   }
-  export function validateEnvironmentUploadFolder(
+  export function validateSceneImportFolder(
     files: Array<{ name: string; size: number }>,
     options?: { maxFileSizeBytes?: number },
   ): {

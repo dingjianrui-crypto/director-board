@@ -92,30 +92,55 @@ button {
 .scene-title {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 8px;
   min-width: 0;
   margin-left: 8px;
 }
 
-.scene-title strong {
-  padding: 6px 11px;
+.scene-title label {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.scene-title label:first-child {
+  width: min(24vw, 260px);
+}
+
+.scene-title label:nth-child(2) {
+  width: min(28vw, 310px);
+}
+
+.scene-title label span {
+  color: #687383;
+  font-size: 10px;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.scene-title input {
+  min-width: 0;
+  height: 28px;
+  padding: 0 9px;
   border: 1px solid #262e3a;
   border-radius: 6px;
   background: #151a22;
-  font-size: 13px;
-  white-space: nowrap;
+  color: #e7eef8;
+  font: inherit;
+  font-size: 12px;
 }
 
-.scene-title span {
-  width: min(32vw, 330px);
-  padding: 6px 11px;
-  border: 1px solid #262e3a;
-  border-radius: 6px;
-  color: #8791a0;
-  font-size: 12px;
+.scene-title input:focus {
+  border-color: #3d8cff;
+  outline: 2px solid rgba(61, 140, 255, 0.18);
+}
+
+.scene-title small {
+  color: #f2c46d;
+  font-size: 11px;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .toolbar-spacer {
@@ -231,11 +256,57 @@ h3 {
   font-size: 11px;
 }
 
+.scene-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 5px;
+  margin-bottom: 5px;
+}
+
+.scene-row.deletable {
+  grid-template-columns: minmax(0, 1fr) 30px;
+}
+
+.scene-row-main {
+  margin-bottom: 0;
+}
+
+.scene-row-delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  min-height: 30px;
+  border: 1px solid #432b33;
+  border-radius: 6px;
+  background: #1b1418;
+  color: #cf9094;
+  cursor: pointer;
+}
+
+.scene-row-delete:hover {
+  border-color: #74424b;
+  background: #321c22;
+  color: #ffd1d4;
+}
+
 .full-button,
 .file-button {
   margin-top: 8px;
   min-height: 30px;
   padding: 0 8px;
+}
+
+.danger-button {
+  color: #f2b6b6;
+  border-color: #59313a;
+  background: #26171b;
+}
+
+.danger-button:hover {
+  color: #ffd2d2;
+  border-color: #7a3b48;
+  background: #341b21;
 }
 
 .file-button {
@@ -324,8 +395,9 @@ h3 {
   position: absolute;
   top: 14px;
   left: 14px;
-  width: min(380px, calc(100% - 28px));
-  padding: 9px 10px;
+  width: max-content;
+  max-width: calc(100% - 28px);
+  padding: 7px 8px;
   border: 1px solid #303847;
   border-radius: 7px;
   background: rgba(16, 20, 27, 0.88);
@@ -339,7 +411,7 @@ h3 {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 
 .viewpoint-head strong {
@@ -347,39 +419,14 @@ h3 {
   font-size: 12px;
 }
 
-.viewpoint-head button,
-.viewpoint-field button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid #344153;
-  border-radius: 5px;
-  background: #1c2531;
-  color: #cbd7e6;
-  cursor: pointer;
-}
-
-.viewpoint-head button:hover,
-.viewpoint-field button:hover {
-  background: #263242;
-  border-color: #45566e;
-}
-
-.viewpoint-head button {
-  gap: 4px;
-  min-height: 23px;
-  padding: 0 7px;
-  font-size: 10px;
-}
-
 .viewpoint-fields {
   display: grid;
-  gap: 5px;
+  gap: 3px;
 }
 
 .viewpoint-field {
   display: grid;
-  grid-template-columns: 45px minmax(0, 1fr) 25px;
+  grid-template-columns: 42px max-content;
   align-items: center;
   gap: 6px;
 }
@@ -396,12 +443,6 @@ h3 {
   font-size: 11px;
   line-height: 1.35;
   color: #dfe8f4;
-}
-
-.viewpoint-field button {
-  width: 25px;
-  height: 25px;
-  padding: 0;
 }
 
 .viewpoint-readout small {

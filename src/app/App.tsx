@@ -3,7 +3,6 @@ import {
   Camera,
   Check,
   Clapperboard,
-  Copy,
   Download,
   Eye,
   EyeOff,
@@ -14,21 +13,29 @@ import {
   Plus,
   RotateCcw,
   Save,
+  Trash2,
   UserRound,
   Video,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  DEFAULT_MAX_ENVIRONMENT_FILE_SIZE_BYTES,
-  EnvironmentValidationError,
+  DEFAULT_MAX_SCENE_FILE_SIZE_BYTES,
+  SceneValidationError,
   formatCameraName,
-  parseBuiltInEnvironmentManifest,
-  validateEnvironmentUploadFolder,
-} from "../environment/index.js";
-import { createStarterScene, proceduralTemplate } from "./sample-data";
+  parseBuiltInSceneManifest,
+  validateSceneImportFolder,
+} from "../scene/index.js";
 import {
-  loadUploadedEnvironmentTemplates,
-  saveUploadedEnvironmentTemplate,
+  cloneSceneAssets,
+  createBlankDraftScene,
+  createSceneWorld,
+  createStarterScene,
+  DEFAULT_SCENE_TRANSFORM,
+} from "./sample-data";
+import {
+  deleteImportedScene,
+  loadImportedScenes,
+  saveImportedScene,
 } from "./project-storage";
 import type {
   BoardObject,
@@ -36,8 +43,9 @@ import type {
   DirectorCamera,
   DirectorScene,
   EditorViewpoint,
-  EnvironmentTransform,
-  EnvironmentTemplate,
+  SceneAssets,
+  SceneTransform,
+  SceneWorld,
   Selection,
   Shot,
   Vector3Tuple,
@@ -47,12 +55,7 @@ import { ThreeViewport, type ThreeViewportHandle } from "./ThreeViewport";
 
 const frameOptions = ["EWS", "WS", "FS", "MS", "MCU", "CU", "ECU", "OTS"];
 const lensOptions = [14, 18, 24, 28, 35, 50, 65, 85, 100, 135];
-const DEFAULT_SCAN_TRANSFORM: EnvironmentTransform = {
-  position: [0, 0, 0],
-  rotation: [0, 0, 0],
-  scale: 1,
-};
-const BUILT_IN_ENVIRONMENT_MANIFEST_PATH = "/assets/environments/manifest.json";
+const BUILT_IN_SCENE_MANIFEST_PATH = "/assets/environments/manifest.json";
 const SHOT_CAPTURE_SIZE = { width: 1440, height: 1080 };
 
 const orientationPresets = [
@@ -63,12 +66,13 @@ const orientationPresets = [
 
 export function App() {
   const viewportRef = useRef<ThreeViewportHandle>(null);
-  const [templates, setTemplates] = useState<EnvironmentTemplate[]>([
-    proceduralTemplate,
+  const [scenes, setScenes] = useState<DirectorScene[]>([
+    createBlankDraftScene(),
+    createStarterScene(),
   ]);
-  const [scenes, setScenes] = useState<DirectorScene[]>([createStarterScene()]);
-  const [activeSceneId, setActiveSceneId] = useState("scene-kitchen-argument");
-  const [selection, setSelection] = useState<Selection>({ type: "camera", id: "cam-a" });
+  const [activeSceneId, setActiveSceneId] = useState("scene-draft");
+  const [dirtySceneIds, setDirtySceneIds] = useState<Set<string>>(new Set());
+  const [selection, setSelection] = useState<Selection>({ type: "scene" });
   const [viewMode, setViewMode] = useState<ViewMode>("move");
   const [showGrid, setShowGrid] = useState(true);
   const [showLabels, setShowLabels] = useState(true);
@@ -82,43 +86,44 @@ export function App() {
   useEffect(() => {
     let cancelled = false;
 
-    async function loadEnvironmentLibrary() {
-      let builtInTemplates: EnvironmentTemplate[] = [];
-      let uploadedTemplates: EnvironmentTemplate[] = [];
+    async function loadSceneLibrary() {
+      let builtInSceneAssets: SceneAssets[] = [];
+      let importedScenes: DirectorScene[] = [];
 
       try {
-        const response = await fetch(BUILT_IN_ENVIRONMENT_MANIFEST_PATH);
+        const response = await fetch(BUILT_IN_SCENE_MANIFEST_PATH);
         if (!response.ok) {
           throw new Error(`Manifest request failed with ${response.status}`);
         }
-        builtInTemplates = parseBuiltInEnvironmentManifest(
+        builtInSceneAssets = parseBuiltInSceneManifest(
           await response.json(),
-        ) as EnvironmentTemplate[];
+        ) as SceneAssets[];
       } catch {
-        if (!cancelled) setStatus("Could not load built-in environment manifest.");
+        if (!cancelled) setStatus("Could not load built-in scene manifest.");
       }
 
       try {
-        uploadedTemplates = await loadUploadedEnvironmentTemplates();
+        importedScenes = await loadImportedScenes();
       } catch {
-        if (!cancelled) setStatus("Could not restore uploaded environment templates.");
+        if (!cancelled) setStatus("Could not restore imported scenes.");
       }
 
-      if (cancelled || (builtInTemplates.length === 0 && uploadedTemplates.length === 0)) {
+      if (cancelled || (builtInSceneAssets.length === 0 && importedScenes.length === 0)) {
         return;
       }
 
-      setTemplates((current) => {
-        const existingIds = new Set(current.map((template) => template.id));
-        const additions = [...builtInTemplates, ...uploadedTemplates].filter(
-          (template) => !existingIds.has(template.id),
+      setScenes((current) => {
+        const existingIds = new Set(current.map((scene) => scene.id));
+        const builtInScenes = builtInSceneAssets.map(createBuiltInSplatScene);
+        const additions = [...builtInScenes, ...importedScenes].filter(
+          (scene) => !existingIds.has(scene.id),
         );
         if (additions.length === 0) return current;
         return [...current, ...additions];
       });
     }
 
-    void loadEnvironmentLibrary();
+    void loadSceneLibrary();
 
     return () => {
       cancelled = true;
@@ -126,9 +131,8 @@ export function App() {
   }, []);
 
   const activeScene = scenes.find((scene) => scene.id === activeSceneId) ?? scenes[0];
-  const activeTemplate =
-    templates.find((template) => template.id === activeScene.environment.templateId) ??
-    proceduralTemplate;
+  const sceneList = scenes.filter((scene) => scene.origin !== "draft");
+  const activeSceneIsDirty = dirtySceneIds.has(activeScene.id);
   const selectedCamera =
     selection.type === "camera"
       ? activeScene.cameras.find((camera) => camera.id === selection.id)
@@ -146,9 +150,9 @@ export function App() {
       ? editorViewpoint.viewpoint
       : undefined;
 
-  const environmentLibraryLabel = useMemo(
-    () => `${templates.length} template${templates.length === 1 ? "" : "s"}`,
-    [templates.length],
+  const sceneListLabel = useMemo(
+    () => `${sceneList.length} scene${sceneList.length === 1 ? "" : "s"}`,
+    [sceneList.length],
   );
 
   useEffect(() => {
@@ -190,25 +194,115 @@ export function App() {
     setScenes((current) =>
       current.map((scene) => (scene.id === activeScene.id ? updater(scene) : scene)),
     );
+    setDirtySceneIds((current) => new Set(current).add(activeScene.id));
   }
 
-  function createSceneFromTemplate(template: EnvironmentTemplate) {
-    const sceneNumber = scenes.length + 1;
-    const environment = createEnvironmentFromTemplate(template);
-    const scene: DirectorScene = {
-      id: `scene-${Date.now().toString(36)}`,
-      name: `${template.name} Scene ${sceneNumber}`,
-      slug: "INT. SCAN - DAY",
-      environment,
-      objects: [],
-      cameras: [],
-      shots: [],
+  function switchScene(sceneId: string) {
+    if (sceneId === activeScene.id) {
+      setSelection({ type: "scene" });
+      return;
+    }
+
+    promptToSaveDirtyScene();
+    setActiveSceneId(sceneId);
+    setSelection({ type: "scene" });
+  }
+
+  function createNewBlankScene() {
+    promptToSaveDirtyScene();
+
+    const draft = {
+      ...createBlankDraftScene(),
+      id: `scene-draft-${Date.now().toString(36)}`,
+    };
+    setScenes((current) => [...current.filter((scene) => scene.origin !== "draft"), draft]);
+    setActiveSceneId(draft.id);
+    setSelection({ type: "scene" });
+    setStatus("Created a blank draft scene");
+  }
+
+  function promptToSaveDirtyScene() {
+    if (!dirtySceneIds.has(activeScene.id)) return;
+
+    const shouldSave = window.confirm(
+      `Save changes to "${activeScene.name}" as a user scene before switching?`,
+    );
+    if (shouldSave) {
+      saveScene(activeScene, { stayOnCurrent: false });
+    }
+  }
+
+  function saveScene(scene = activeScene, options: { stayOnCurrent?: boolean } = {}) {
+    if (scene.origin === "user") {
+      setDirtySceneIds((current) => {
+        const next = new Set(current);
+        next.delete(scene.id);
+        return next;
+      });
+      setStatus(`Saved ${scene.name}`);
+      return scene.id;
+    }
+
+    const copyName =
+      scene.origin === "draft" ? scene.name : createCopyName(scene.name, scenes);
+    const copy: DirectorScene = {
+      ...cloneScene(scene),
+      id: `scene-user-${Date.now().toString(36)}`,
+      name: copyName,
+      origin: "user",
+      builtInId: undefined,
     };
 
-    setScenes((current) => [...current, scene]);
-    setActiveSceneId(scene.id);
-    setSelection({ type: "environment" });
-    setStatus(`Created ${scene.name}`);
+    setScenes((current) => [...current, copy]);
+    setDirtySceneIds((current) => {
+      const next = new Set(current);
+      next.delete(scene.id);
+      return next;
+    });
+    if (options.stayOnCurrent ?? true) {
+      setActiveSceneId(copy.id);
+      setSelection({ type: "scene" });
+    }
+    setStatus(`Saved ${copy.name}`);
+    return copy.id;
+  }
+
+  async function deleteScene(scene = activeScene) {
+    if (scene.origin !== "user") {
+      setStatus("Built-in scenes cannot be deleted.");
+      return;
+    }
+
+    const shouldDelete = window.confirm(
+      `Delete "${scene.name}"? This removes it from this browser.`,
+    );
+    if (!shouldDelete) return;
+
+    try {
+      if (scene.assets.source === "upload") {
+        await deleteImportedScene(scene);
+      }
+
+      const fallbackScene =
+        scenes.find((entry) => entry.id !== scene.id && entry.origin === "draft") ??
+        scenes.find((entry) => entry.id !== scene.id) ??
+        createBlankDraftScene();
+
+      setScenes((current) => {
+        const remaining = current.filter((entry) => entry.id !== scene.id);
+        return remaining.length > 0 ? remaining : [fallbackScene];
+      });
+      setDirtySceneIds((current) => {
+        const next = new Set(current);
+        next.delete(scene.id);
+        return next;
+      });
+      setActiveSceneId(fallbackScene.id);
+      setSelection({ type: "scene" });
+      setStatus(`Deleted ${scene.name}`);
+    } catch {
+      setStatus(`Could not delete ${scene.name}.`);
+    }
   }
 
   function addObject(kind: BoardObjectKind, model: string) {
@@ -274,7 +368,7 @@ export function App() {
       setSelection(
         activeScene.cameras[0]
           ? { type: "camera", id: activeScene.cameras[0].id }
-          : { type: "environment" },
+          : { type: "scene" },
       );
       setStatus(`Deleted ${object.name}`);
       return;
@@ -296,7 +390,7 @@ export function App() {
           ? { type: "camera", id: remainingCameras[0].id }
           : activeScene.objects[0]
             ? { type: "object", id: activeScene.objects[0].id }
-            : { type: "environment" },
+            : { type: "scene" },
       );
       setStatus(`Deleted ${camera.name}`);
     }
@@ -322,31 +416,40 @@ export function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [activeScene, selection]);
 
-  function updateEnvironment(patch: Partial<DirectorScene["environment"]>) {
+  function updateSceneName(name: string) {
+    updateScene((scene) => ({ ...scene, name }));
+  }
+
+  function updateSceneSlug(slug: string) {
+    updateScene((scene) => ({ ...scene, slug }));
+  }
+
+  function updateWorld(patch: Partial<SceneWorld>) {
     updateScene((scene) => ({
       ...scene,
-      environment: {
-        ...scene.environment,
+      world: {
+        ...scene.world,
         ...patch,
         collision: patch.collision
-          ? { ...scene.environment.collision, ...patch.collision }
-          : scene.environment.collision,
-        transform: patch.transform ?? scene.environment.transform,
+          ? { ...scene.world.collision, ...patch.collision }
+          : scene.world.collision,
+        transform: patch.transform ?? scene.world.transform,
       },
     }));
   }
 
-  async function handleEnvironmentUpload(files: FileList | null) {
+  async function handleSceneImport(files: FileList | null) {
     if (!files) return;
 
     try {
       const fileArray = Array.from(files);
-      const validated = validateEnvironmentUploadFolder(fileArray, {
-        maxFileSizeBytes: DEFAULT_MAX_ENVIRONMENT_FILE_SIZE_BYTES,
+      const validated = validateSceneImportFolder(fileArray, {
+        maxFileSizeBytes: DEFAULT_MAX_SCENE_FILE_SIZE_BYTES,
       });
-      const template: EnvironmentTemplate = {
-        id: `template-${Date.now().toString(36)}`,
-        name: validated.splat.name.replace(/\.[^.]+$/, ""),
+      const sceneName = suggestSceneName(validated.splat.name, scenes);
+      const assets: SceneAssets = {
+        id: `assets-${Date.now().toString(36)}`,
+        name: sceneName,
         source: "upload",
         splat: {
           path: validated.splat.name,
@@ -363,20 +466,33 @@ export function App() {
           objectUrl: URL.createObjectURL(validated.collision.file),
         },
         defaults: {
-          transform: cloneTransform(DEFAULT_SCAN_TRANSFORM),
+          transform: cloneTransform(DEFAULT_SCENE_TRANSFORM),
         },
       };
+      const scene: DirectorScene = {
+        id: `scene-import-${Date.now().toString(36)}`,
+        name: sceneName,
+        slug: "INT. SCAN - DAY",
+        origin: "user",
+        assets,
+        world: createSceneWorld(assets),
+        objects: [],
+        cameras: [],
+        shots: [],
+      };
 
-      await saveUploadedEnvironmentTemplate(template);
-      setTemplates((current) => [...current, template]);
-      createSceneFromTemplate(template);
+      await saveImportedScene(scene);
+      setScenes((current) => [...current, scene]);
+      setActiveSceneId(scene.id);
+      setSelection({ type: "scene" });
+      setStatus(`Imported ${scene.name}`);
     } catch (error) {
-      if (error instanceof EnvironmentValidationError) {
+      if (error instanceof SceneValidationError) {
         setStatus(error.message);
         return;
       }
 
-      setStatus("Could not import environment folder.");
+      setStatus("Could not import scene folder.");
     }
   }
 
@@ -423,11 +539,28 @@ export function App() {
           <Clapperboard size={16} />
           <span>DirectorBoard</span>
         </div>
-        <button className="toolbar-button"><Save size={14} /> File</button>
+        <button className="toolbar-button" onClick={() => saveScene()}>
+          <Save size={14} /> Save
+        </button>
         <button className="toolbar-button"><Download size={14} /> Export</button>
         <div className="scene-title">
-          <strong>{activeScene.name}</strong>
-          <span>{activeScene.slug}</span>
+          <label>
+            <span>Name</span>
+            <input
+              aria-label="Scene name"
+              value={activeScene.name}
+              onChange={(event) => updateSceneName(event.target.value)}
+            />
+          </label>
+          <label>
+            <span>Slug</span>
+            <input
+              aria-label="Scene slug"
+              value={activeScene.slug}
+              onChange={(event) => updateSceneSlug(event.target.value)}
+            />
+          </label>
+          {activeSceneIsDirty && <small>unsaved</small>}
         </div>
         <div className="toolbar-spacer" />
         <div className="segmented">
@@ -473,41 +606,48 @@ export function App() {
           </section>
 
           <section>
-            <h2>Environment</h2>
-            {templates.map((template) => {
-              const isActiveTemplate = template.id === activeTemplate.id;
-              return (
+            <h2>Scenes</h2>
+            {sceneList.map((scene) => (
+              <div
+                key={scene.id}
+                className={`scene-row ${scene.origin === "user" ? "deletable" : ""}`}
+              >
                 <button
-                  key={template.id}
-                  className={`list-row ${
-                    isActiveTemplate && selection.type === "environment" ? "selected" : ""
+                  className={`list-row scene-row-main ${
+                    scene.id === activeScene.id && selection.type === "scene" ? "selected" : ""
                   }`}
-                  onClick={() =>
-                    isActiveTemplate
-                      ? setSelection({ type: "environment" })
-                      : createSceneFromTemplate(template)
-                  }
+                  onClick={() => switchScene(scene.id)}
                 >
-                  <span className={`dot ${isActiveTemplate ? "cyan" : "neutral"}`} />
-                  <span>{template.name}</span>
+                  <span className={`dot ${scene.id === activeScene.id ? "cyan" : "neutral"}`} />
+                  <span>{scene.name}{dirtySceneIds.has(scene.id) ? " *" : ""}</span>
                 </button>
-              );
-            })}
+                {scene.origin === "user" && (
+                  <button
+                    className="scene-row-delete"
+                    aria-label={`Delete ${scene.name}`}
+                    title={`Delete ${scene.name}`}
+                    onClick={() => deleteScene(scene)}
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                )}
+              </div>
+            ))}
             <label className="mini-toggle">
               <input
-                checked={activeScene.environment.visible}
-                onChange={(event) => updateEnvironment({ visible: event.target.checked })}
+                checked={activeScene.world.visible}
+                onChange={(event) => updateWorld({ visible: event.target.checked })}
                 type="checkbox"
               />
               splat visible
             </label>
             <label className="mini-toggle">
               <input
-                checked={activeScene.environment.collision.visibleInEditor}
+                checked={activeScene.world.collision.visibleInEditor}
                 onChange={(event) =>
-                  updateEnvironment({
+                  updateWorld({
                     collision: {
-                      ...activeScene.environment.collision,
+                      ...activeScene.world.collision,
                       visibleInEditor: event.target.checked,
                     },
                   })
@@ -518,20 +658,20 @@ export function App() {
             </label>
             <button
               className="full-button"
-              onClick={() => createSceneFromTemplate(activeTemplate)}
+              onClick={createNewBlankScene}
             >
-              <Plus size={14} /> New scene from template
+              <Plus size={14} /> New
             </button>
             <label className="full-button file-button">
-              <FileUp size={14} /> Import environment folder
+              <FileUp size={14} /> Import
               <input
                 type="file"
                 multiple
-                onChange={(event) => handleEnvironmentUpload(event.currentTarget.files)}
+                onChange={(event) => handleSceneImport(event.currentTarget.files)}
                 {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
               />
             </label>
-            <p className="hint">{environmentLibraryLabel} in project library</p>
+            <p className="hint">{sceneListLabel} available</p>
           </section>
 
           <SceneList
@@ -545,7 +685,6 @@ export function App() {
           <ThreeViewport
             ref={viewportRef}
             scene={activeScene}
-            template={activeTemplate}
             selectedCameraId={selectedCamera?.id}
             selection={selection}
             showGrid={showGrid}
@@ -564,7 +703,6 @@ export function App() {
           <div className="viewport-overlays">
             <ViewpointReadout
               viewpoint={currentEditorViewpoint}
-              onCopyStatus={setStatus}
             />
             <div className="view-chip">
               <Grid3X3 size={13} />
@@ -583,15 +721,18 @@ export function App() {
 
         <aside className="right-panel">
           <div className="tabs">
+            <button className={selection.type === "scene" ? "active" : ""}>Scene</button>
             <button className={selection.type === "object" ? "active" : ""}>Object</button>
             <button className={selection.type === "camera" ? "active" : ""}>Camera</button>
             <button className={selection.type === "shot" ? "active" : ""}>Shot</button>
           </div>
-          {selection.type === "environment" && (
-            <EnvironmentInspector
+          {selection.type === "scene" && (
+            <SceneInspector
               scene={activeScene}
-              template={activeTemplate}
-              onUpdate={updateEnvironment}
+              onUpdateName={updateSceneName}
+              onUpdateSlug={updateSceneSlug}
+              onUpdateWorld={updateWorld}
+              onDelete={deleteScene}
             />
           )}
           {selectedObject && (
@@ -663,27 +804,77 @@ export function App() {
   );
 }
 
-function createEnvironmentFromTemplate(
-  template: EnvironmentTemplate,
-): DirectorScene["environment"] {
-  const transform = template.defaults?.transform ?? {
-    position: [0, 0, 0],
-    rotation: [0, 0, 0],
-    scale: 1,
-  };
+function createBuiltInSplatScene(assets: SceneAssets): DirectorScene {
+  const sceneName = assets.name.toLowerCase().includes("splat")
+    ? assets.name
+    : `Splat ${assets.name}`;
 
   return {
-    templateId: template.id,
-    transform: cloneTransform(transform),
-    visible: template.defaults?.visible ?? true,
-    opacity: template.defaults?.opacity ?? 1,
-    renderMode: template.defaults?.renderMode ?? "auto",
-    gridY: template.defaults?.gridY,
-    collision: {
-      visibleInEditor: template.defaults?.collision?.visibleInEditor ?? false,
-      displayMode: template.defaults?.collision?.displayMode ?? "hidden",
-    },
+    id: `scene-built-in-${assets.id}`,
+    name: sceneName,
+    slug: "INT. SCAN - DAY",
+    origin: "built-in",
+    builtInId: assets.id,
+    assets: cloneSceneAssets({
+      ...assets,
+      name: sceneName,
+    }),
+    world: createSceneWorld(assets),
+    objects: [],
+    cameras: [],
+    shots: [],
   };
+}
+
+function cloneScene(scene: DirectorScene): DirectorScene {
+  return {
+    ...scene,
+    assets: cloneSceneAssets(scene.assets),
+    world: {
+      ...scene.world,
+      transform: cloneTransform(scene.world.transform),
+      collision: { ...scene.world.collision },
+    },
+    objects: scene.objects.map((object) => ({
+      ...object,
+      position: [...object.position],
+    })),
+    cameras: scene.cameras.map((camera) => ({
+      ...camera,
+      position: [...camera.position],
+      lookAt: [...camera.lookAt],
+    })),
+    shots: scene.shots.map((shot) => ({ ...shot })),
+  };
+}
+
+function createCopyName(name: string, scenes: DirectorScene[]) {
+  const base = `${name} Copy`;
+  const existingNames = new Set(scenes.map((scene) => scene.name));
+  if (!existingNames.has(base)) return base;
+
+  let index = 2;
+  while (existingNames.has(`${base} ${index}`)) {
+    index += 1;
+  }
+  return `${base} ${index}`;
+}
+
+function suggestSceneName(splatFileName: string, scenes: DirectorScene[]) {
+  const base =
+    splatFileName
+      .replace(/\.[^.]+$/, "")
+      .replace(/[_-]+/g, " ")
+      .replace(/\b\w/g, (letter) => letter.toUpperCase())
+      .trim() || "Imported Scene";
+  const existingNames = new Set(scenes.map((scene) => scene.name));
+  if (!existingNames.has(base)) return base;
+
+  let index = 2;
+  while (existingNames.has(`${base} ${index}`)) {
+    index += 1;
+  }
+  return `${base} ${index}`;
 }
 
 function SceneList({
@@ -835,33 +1026,39 @@ function ObjectInspector({
   );
 }
 
-function EnvironmentInspector({
+function SceneInspector({
   scene,
-  template,
-  onUpdate,
+  onUpdateName,
+  onUpdateSlug,
+  onUpdateWorld,
+  onDelete,
 }: {
   scene: DirectorScene;
-  template: EnvironmentTemplate;
-  onUpdate: (patch: Partial<DirectorScene["environment"]>) => void;
+  onUpdateName: (name: string) => void;
+  onUpdateSlug: (slug: string) => void;
+  onUpdateWorld: (patch: Partial<DirectorScene["world"]>) => void;
+  onDelete: (scene: DirectorScene) => void;
 }) {
   return (
     <div className="inspector">
+      <LabeledInput label="Name" value={scene.name} onChange={onUpdateName} />
+      <LabeledInput label="Slug" value={scene.slug} onChange={onUpdateSlug} />
       <div className="readonly-block">
-        <span>Template</span>
-        <strong>{template.name}</strong>
-        <small>{template.source}</small>
+        <span>Assets</span>
+        <strong>{scene.assets.name}</strong>
+        <small>{scene.origin} · {scene.assets.source}</small>
       </div>
       <VectorEditor
         label="Position"
-        value={scene.environment.transform.position}
+        value={scene.world.transform.position}
         onChange={(position) =>
-          onUpdate({ transform: { ...scene.environment.transform, position } })
+          onUpdateWorld({ transform: { ...scene.world.transform, position } })
         }
       />
       <RotationEditor
-        value={scene.environment.transform.rotation}
+        value={scene.world.transform.rotation}
         onChange={(rotation) =>
-          onUpdate({ transform: { ...scene.environment.transform, rotation } })
+          onUpdateWorld({ transform: { ...scene.world.transform, rotation } })
         }
       />
       <div className="pill-row">
@@ -869,14 +1066,14 @@ function EnvironmentInspector({
           <button
             key={preset.label}
             className={
-              rotationsMatch(scene.environment.transform.rotation, preset.rotation)
+              rotationsMatch(scene.world.transform.rotation, preset.rotation)
                 ? "active"
                 : ""
             }
             onClick={() =>
-              onUpdate({
+              onUpdateWorld({
                 transform: {
-                  ...scene.environment.transform,
+                  ...scene.world.transform,
                   rotation: preset.rotation,
                 },
               })
@@ -891,26 +1088,26 @@ function EnvironmentInspector({
         <input
           type="number"
           step="0.05"
-          value={scene.environment.gridY ?? 0}
-          onChange={(event) => onUpdate({ gridY: Number(event.target.value) })}
+          value={scene.world.gridY ?? 0}
+          onChange={(event) => onUpdateWorld({ gridY: Number(event.target.value) })}
         />
       </label>
       <div className="pill-row">
         <button
           onClick={() =>
-            onUpdate({ gridY: Number(((scene.environment.gridY ?? 0) - 0.1).toFixed(2)) })
+            onUpdateWorld({ gridY: Number(((scene.world.gridY ?? 0) - 0.1).toFixed(2)) })
           }
         >
           -0.1
         </button>
         <button
           onClick={() =>
-            onUpdate({ gridY: Number(((scene.environment.gridY ?? 0) + 0.1).toFixed(2)) })
+            onUpdateWorld({ gridY: Number(((scene.world.gridY ?? 0) + 0.1).toFixed(2)) })
           }
         >
           +0.1
         </button>
-        <button onClick={() => onUpdate({ gridY: undefined })}>Reset</button>
+        <button onClick={() => onUpdateWorld({ gridY: undefined })}>Reset</button>
       </div>
       <label className="field">
         <span>Scale</span>
@@ -919,17 +1116,17 @@ function EnvironmentInspector({
           min="0.1"
           max="3"
           step="0.05"
-          value={scene.environment.transform.scale}
+          value={scene.world.transform.scale}
           onChange={(event) =>
-            onUpdate({
+            onUpdateWorld({
               transform: {
-                ...scene.environment.transform,
+                ...scene.world.transform,
                 scale: Number(event.target.value),
               },
             })
           }
         />
-        <small>{scene.environment.transform.scale.toFixed(2)}</small>
+        <small>{scene.world.transform.scale.toFixed(2)}</small>
       </label>
       <label className="field">
         <span>Opacity</span>
@@ -938,16 +1135,16 @@ function EnvironmentInspector({
           min="0.15"
           max="1"
           step="0.05"
-          value={scene.environment.opacity}
-          onChange={(event) => onUpdate({ opacity: Number(event.target.value) })}
+          value={scene.world.opacity}
+          onChange={(event) => onUpdateWorld({ opacity: Number(event.target.value) })}
         />
       </label>
       <div className="pill-row">
         {(["auto", "quality", "balanced", "fast"] as const).map((mode) => (
           <button
             key={mode}
-            className={scene.environment.renderMode === mode ? "active" : ""}
-            onClick={() => onUpdate({ renderMode: mode })}
+            className={scene.world.renderMode === mode ? "active" : ""}
+            onClick={() => onUpdateWorld({ renderMode: mode })}
           >
             {mode}
           </button>
@@ -956,17 +1153,23 @@ function EnvironmentInspector({
       <button
         className="full-button"
         onClick={() =>
-          onUpdate({
+          onUpdateWorld({
             collision: {
-              ...scene.environment.collision,
-              visibleInEditor: !scene.environment.collision.visibleInEditor,
+              ...scene.world.collision,
+              visibleInEditor: !scene.world.collision.visibleInEditor,
             },
           })
         }
       >
-        {scene.environment.collision.visibleInEditor ? <EyeOff size={14} /> : <Eye size={14} />}
+        {scene.world.collision.visibleInEditor ? <EyeOff size={14} /> : <Eye size={14} />}
         Collision debug
       </button>
+      {scene.origin === "user" && (
+        <button className="full-button danger-button" onClick={() => onDelete(scene)}>
+          <Trash2 size={14} />
+          Delete Scene
+        </button>
+      )}
     </div>
   );
 }
@@ -986,10 +1189,8 @@ function ShotInspector({ shot, camera }: { shot: Shot; camera?: DirectorCamera }
 
 function ViewpointReadout({
   viewpoint,
-  onCopyStatus,
 }: {
   viewpoint?: EditorViewpoint;
-  onCopyStatus: (message: string) => void;
 }) {
   const eyeValue = viewpoint ? formatTuple(viewpoint.eye) : "";
   const targetValue = viewpoint ? formatTuple(viewpoint.target) : "";
@@ -1004,16 +1205,8 @@ function ViewpointReadout({
       </div>
       {viewpoint ? (
         <div className="viewpoint-fields">
-          <CopyableViewpointValue
-            label="eye"
-            value={eyeValue}
-            onCopyStatus={onCopyStatus}
-          />
-          <CopyableViewpointValue
-            label="target"
-            value={targetValue}
-            onCopyStatus={onCopyStatus}
-          />
+          <ViewpointValue label="eye" value={eyeValue} />
+          <ViewpointValue label="target" value={targetValue} />
         </div>
       ) : (
         <small>waiting</small>
@@ -1022,26 +1215,17 @@ function ViewpointReadout({
   );
 }
 
-function CopyableViewpointValue({
+function ViewpointValue({
   label,
   value,
-  onCopyStatus,
 }: {
   label: string;
   value: string;
-  onCopyStatus: (message: string) => void;
 }) {
   return (
     <div className="viewpoint-field">
       <span>{label}</span>
       <code>{value}</code>
-      <button
-        type="button"
-        aria-label={`Copy viewpoint ${label}`}
-        onClick={() => copyViewpointValue(`viewpoint ${label}`, value, onCopyStatus)}
-      >
-        <Copy size={12} />
-      </button>
     </div>
   );
 }
@@ -1153,7 +1337,7 @@ function RotationEditor({
   );
 }
 
-function cloneTransform(transform: EnvironmentTransform): EnvironmentTransform {
+function cloneTransform(transform: SceneTransform): SceneTransform {
   return {
     position: [...transform.position],
     rotation: [...transform.rotation],
@@ -1175,39 +1359,6 @@ function degreesToRadians(value: number) {
 
 function formatTuple(tuple: Vector3Tuple) {
   return `[${tuple.map((value) => value.toFixed(4)).join(", ")}]`;
-}
-
-async function copyViewpointValue(
-  label: string,
-  value: string,
-  onCopyStatus: (message: string) => void,
-) {
-  try {
-    await writeClipboardText(value);
-    onCopyStatus(`Copied ${label}`);
-  } catch (error) {
-    onCopyStatus("Copy failed; select the field manually");
-  }
-}
-
-async function writeClipboardText(value: string) {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(value);
-    return;
-  }
-
-  const textarea = document.createElement("textarea");
-  textarea.value = value;
-  textarea.setAttribute("readonly", "");
-  textarea.style.position = "fixed";
-  textarea.style.left = "-9999px";
-  document.body.append(textarea);
-  textarea.select();
-  const copied = document.execCommand("copy");
-  textarea.remove();
-  if (!copied) {
-    throw new Error("Clipboard copy failed.");
-  }
 }
 
 function modelName(model: string, index: number) {

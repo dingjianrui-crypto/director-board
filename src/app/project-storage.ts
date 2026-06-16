@@ -1,12 +1,15 @@
-import type { EnvironmentTemplate } from "./types";
+import type { DirectorScene, SceneAssets } from "./types";
+import { createSceneWorld } from "./sample-data";
 
 const DB_NAME = "directorboard-project-storage";
-const DB_VERSION = 1;
-const ENVIRONMENT_STORE = "environment-templates";
+const DB_VERSION = 2;
+const IMPORTED_SCENE_STORE = "imported-scenes";
+const LEGACY_ASSET_STORE = "environment-templates";
 
-type StoredEnvironmentRecord = {
+type StoredImportedSceneRecord = {
   id: string;
   name: string;
+  slug: string;
   splat: {
     path: string;
     sizeBytes: number;
@@ -19,52 +22,104 @@ type StoredEnvironmentRecord = {
     fileType: string;
     blob: Blob;
   };
-  defaults?: EnvironmentTemplate["defaults"];
+  defaults?: SceneAssets["defaults"];
 };
 
-export async function saveUploadedEnvironmentTemplate(
-  template: EnvironmentTemplate,
-) {
-  if (!template.splat?.file || !template.collision?.file) {
-    throw new Error("Uploaded environment template must include file blobs.");
+type LegacyAssetRecord = {
+  id: string;
+  name: string;
+  splat: StoredImportedSceneRecord["splat"];
+  collision: StoredImportedSceneRecord["collision"];
+  defaults?: SceneAssets["defaults"];
+};
+
+export async function saveImportedScene(scene: DirectorScene) {
+  if (!scene.assets.splat?.file || !scene.assets.collision?.file) {
+    throw new Error("Imported scene must include file blobs.");
   }
 
   const db = await openProjectDatabase();
-  const record: StoredEnvironmentRecord = {
-    id: template.id,
-    name: template.name,
+  const record: StoredImportedSceneRecord = {
+    id: scene.id,
+    name: scene.name,
+    slug: scene.slug,
     splat: {
-      path: template.splat.path,
-      sizeBytes: template.splat.sizeBytes,
-      fileType: template.splat.fileType,
-      blob: template.splat.file,
+      path: scene.assets.splat.path,
+      sizeBytes: scene.assets.splat.sizeBytes,
+      fileType: scene.assets.splat.fileType,
+      blob: scene.assets.splat.file,
     },
     collision: {
-      path: template.collision.path,
-      sizeBytes: template.collision.sizeBytes,
-      fileType: template.collision.fileType,
-      blob: template.collision.file,
+      path: scene.assets.collision.path,
+      sizeBytes: scene.assets.collision.sizeBytes,
+      fileType: scene.assets.collision.fileType,
+      blob: scene.assets.collision.file,
     },
-    defaults: template.defaults,
+    defaults: scene.assets.defaults,
   };
 
-  await runTransaction(db, ENVIRONMENT_STORE, "readwrite", (store) => {
+  await runTransaction(db, IMPORTED_SCENE_STORE, "readwrite", (store) => {
     store.put(record);
   });
   db.close();
 }
 
-export async function loadUploadedEnvironmentTemplates() {
+export async function deleteImportedScene(scene: DirectorScene) {
   const db = await openProjectDatabase();
-  const records = await readAllRecords<StoredEnvironmentRecord>(
-    db,
-    ENVIRONMENT_STORE,
-  );
+  const deletions: Array<Promise<void>> = [];
+
+  if (db.objectStoreNames.contains(IMPORTED_SCENE_STORE)) {
+    deletions.push(
+      runTransaction(db, IMPORTED_SCENE_STORE, "readwrite", (store) => {
+        store.delete(scene.id);
+      }),
+    );
+  }
+
+  if (
+    scene.assets.source === "upload" &&
+    scene.id.startsWith("scene-import-") &&
+    db.objectStoreNames.contains(LEGACY_ASSET_STORE)
+  ) {
+    deletions.push(
+      runTransaction(db, LEGACY_ASSET_STORE, "readwrite", (store) => {
+        store.delete(scene.id.replace(/^scene-import-/, ""));
+      }),
+    );
+  }
+
+  await Promise.all(deletions);
+  db.close();
+}
+
+export async function loadImportedScenes() {
+  const db = await openProjectDatabase();
+  const records = db.objectStoreNames.contains(IMPORTED_SCENE_STORE)
+    ? await readAllRecords<StoredImportedSceneRecord>(db, IMPORTED_SCENE_STORE)
+    : [];
+  const legacyRecords = db.objectStoreNames.contains(LEGACY_ASSET_STORE)
+    ? await readAllRecords<LegacyAssetRecord>(db, LEGACY_ASSET_STORE)
+    : [];
   db.close();
 
-  return records.map(
-    (record): EnvironmentTemplate => ({
-      id: record.id,
+  const scenes = records.map(createSceneFromStoredRecord);
+  const existingIds = new Set(scenes.map((scene) => scene.id));
+  const legacyScenes = legacyRecords
+    .filter((record) => !existingIds.has(`scene-import-${record.id}`))
+    .map((record) =>
+      createSceneFromStoredRecord({
+        ...record,
+        id: `scene-import-${record.id}`,
+        slug: "INT. SCAN - DAY",
+      }),
+    );
+
+  return [...scenes, ...legacyScenes];
+}
+
+function createSceneFromStoredRecord(record: StoredImportedSceneRecord): DirectorScene {
+    const assets: SceneAssets = {
+      id: `assets-${record.id}`,
       name: record.name,
       source: "upload",
       splat: {
@@ -79,14 +134,25 @@ export async function loadUploadedEnvironmentTemplates() {
         fileType: record.collision.fileType,
         objectUrl: URL.createObjectURL(record.collision.blob),
       },
-      defaults: normalizeUploadedTemplateDefaults(record.defaults),
-    }),
-  );
+      defaults: normalizeUploadedSceneDefaults(record.defaults),
+    };
+
+    return {
+      id: record.id,
+      name: record.name,
+      slug: record.slug,
+      origin: "user",
+      assets,
+      world: createSceneWorld(assets),
+      objects: [],
+      cameras: [],
+      shots: [],
+    };
 }
 
-function normalizeUploadedTemplateDefaults(
-  defaults: EnvironmentTemplate["defaults"],
-): EnvironmentTemplate["defaults"] {
+function normalizeUploadedSceneDefaults(
+  defaults: SceneAssets["defaults"],
+): SceneAssets["defaults"] {
   if (!defaults?.transform) return defaults;
 
   const { rotation } = defaults.transform;
@@ -112,8 +178,8 @@ function openProjectDatabase() {
 
     request.onupgradeneeded = () => {
       const db = request.result;
-      if (!db.objectStoreNames.contains(ENVIRONMENT_STORE)) {
-        db.createObjectStore(ENVIRONMENT_STORE, { keyPath: "id" });
+      if (!db.objectStoreNames.contains(IMPORTED_SCENE_STORE)) {
+        db.createObjectStore(IMPORTED_SCENE_STORE, { keyPath: "id" });
       }
     };
 

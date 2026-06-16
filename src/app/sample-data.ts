@@ -2,13 +2,26 @@ import type {
   BoardObject,
   DirectorCamera,
   DirectorScene,
-  EnvironmentTemplate,
+  SceneAssets,
+  SceneTransform,
   Shot,
 } from "./types";
 
-export const proceduralTemplate: EnvironmentTemplate = {
-  id: "template-procedural-kitchen",
-  name: "Procedural Kitchen",
+export const DEFAULT_SCENE_TRANSFORM: SceneTransform = {
+  position: [0, 0, 0],
+  rotation: [0, 0, 0],
+  scale: 1,
+};
+
+export const blankSceneAssets: SceneAssets = {
+  id: "assets-blank",
+  name: "Blank",
+  source: "blank",
+};
+
+export const starterSceneAssets: SceneAssets = {
+  id: "assets-starter-procedural",
+  name: "Starter Blockout",
   source: "procedural",
   defaults: {
     viewpoint: {
@@ -140,28 +153,84 @@ export const starterShot: Shot = {
   duration: "4s",
 };
 
+export function createBlankDraftScene(): DirectorScene {
+  return {
+    id: "scene-draft",
+    name: "Untitled Scene",
+    slug: "NEW SCENE",
+    origin: "draft",
+    assets: cloneSceneAssets(blankSceneAssets),
+    world: createSceneWorld(blankSceneAssets),
+    objects: [],
+    cameras: [],
+    shots: [],
+  };
+}
+
 export function createStarterScene(): DirectorScene {
   return {
-    id: "scene-kitchen-argument",
-    name: "Kitchen Argument",
+    id: "scene-starter",
+    name: "Starter Scene",
     slug: "INT. KITCHEN - NIGHT",
-    environment: {
-      templateId: proceduralTemplate.id,
-      transform: {
-        position: [0, 0, 0],
-        rotation: [0, 0, 0],
-        scale: 1,
-      },
-      visible: true,
-      opacity: 1,
-      renderMode: "auto",
-      collision: {
-        visibleInEditor: false,
-        displayMode: "hidden",
-      },
-    },
-    objects: starterObjects,
-    cameras: starterCameras,
+    origin: "built-in",
+    builtInId: "starter",
+    assets: cloneSceneAssets(starterSceneAssets),
+    world: createSceneWorld(starterSceneAssets),
+    objects: starterObjects.map((object) => ({ ...object, position: [...object.position] })),
+    cameras: starterCameras.map((camera) => ({
+      ...camera,
+      position: [...camera.position],
+      lookAt: [...camera.lookAt],
+    })),
     shots: [starterShot],
+  };
+}
+
+export function createSceneWorld(assets: SceneAssets): DirectorScene["world"] {
+  const transform = assets.defaults?.transform ?? DEFAULT_SCENE_TRANSFORM;
+
+  return {
+    transform: cloneTransform(transform),
+    visible: assets.source !== "blank" && (assets.defaults?.visible ?? true),
+    opacity: assets.defaults?.opacity ?? 1,
+    renderMode: assets.defaults?.renderMode ?? "auto",
+    gridY: assets.defaults?.gridY,
+    collision: {
+      visibleInEditor: assets.defaults?.collision?.visibleInEditor ?? false,
+      displayMode: assets.defaults?.collision?.displayMode ?? "hidden",
+    },
+  };
+}
+
+export function cloneSceneAssets(assets: SceneAssets): SceneAssets {
+  return {
+    ...assets,
+    splat: assets.splat ? { ...assets.splat } : undefined,
+    collision: assets.collision ? { ...assets.collision } : undefined,
+    defaults: assets.defaults
+      ? {
+          ...assets.defaults,
+          transform: assets.defaults.transform
+            ? cloneTransform(assets.defaults.transform)
+            : undefined,
+          viewpoint: assets.defaults.viewpoint
+            ? {
+                eye: [...assets.defaults.viewpoint.eye],
+                target: [...assets.defaults.viewpoint.target],
+              }
+            : undefined,
+          collision: assets.defaults.collision
+            ? { ...assets.defaults.collision }
+            : undefined,
+        }
+      : undefined,
+  };
+}
+
+function cloneTransform(transform: SceneTransform): SceneTransform {
+  return {
+    position: [...transform.position],
+    rotation: [...transform.rotation],
+    scale: transform.scale,
   };
 }

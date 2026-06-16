@@ -2,17 +2,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  DEFAULT_MAX_ENVIRONMENT_FILE_SIZE_BYTES,
-  EnvironmentManifestError,
-  EnvironmentValidationError,
-  createSceneFromEnvironmentTemplate,
+  DEFAULT_MAX_SCENE_FILE_SIZE_BYTES,
+  SceneManifestError,
+  SceneValidationError,
+  createSceneFromAssets,
   formatCameraName,
   getCameraBookmarkStorageKey,
   isSurfacePlaceable,
-  parseBuiltInEnvironmentManifest,
-  updateSceneEnvironmentSettings,
-  validateEnvironmentUploadFolder,
-} from "../src/environment/index.js";
+  parseBuiltInSceneManifest,
+  updateSceneWorldSettings,
+  validateSceneImportFolder,
+} from "../src/scene/index.js";
 
 const validManifest = [
   {
@@ -31,10 +31,10 @@ const validManifest = [
   },
 ];
 
-test("parses built-in environment manifest entries", () => {
-  const templates = parseBuiltInEnvironmentManifest(validManifest);
+test("parses built-in scene manifest entries", () => {
+  const assets = parseBuiltInSceneManifest(validManifest);
 
-  assert.deepEqual(templates, [
+  assert.deepEqual(assets, [
     {
       id: "kitchen",
       name: "Kitchen",
@@ -54,8 +54,8 @@ test("parses built-in environment manifest entries", () => {
   ]);
 });
 
-test("parses built-in environment viewpoint defaults", () => {
-  const templates = parseBuiltInEnvironmentManifest([
+test("parses built-in scene viewpoint defaults", () => {
+  const assets = parseBuiltInSceneManifest([
     {
       ...validManifest[0],
       defaults: {
@@ -67,7 +67,7 @@ test("parses built-in environment viewpoint defaults", () => {
     },
   ]);
 
-  assert.deepEqual(templates[0].defaults, {
+  assert.deepEqual(assets[0].defaults, {
     viewpoint: {
       eye: [-1.9057, -0.1362, 9.4594],
       target: [-1.5351, -0.1019, 8.5312],
@@ -75,10 +75,10 @@ test("parses built-in environment viewpoint defaults", () => {
   });
 });
 
-test("rejects invalid built-in environment viewpoint defaults", () => {
+test("rejects invalid built-in scene viewpoint defaults", () => {
   assert.throws(
     () =>
-      parseBuiltInEnvironmentManifest([
+      parseBuiltInSceneManifest([
         {
           ...validManifest[0],
           defaults: {
@@ -90,23 +90,23 @@ test("rejects invalid built-in environment viewpoint defaults", () => {
         },
       ]),
     (error) =>
-      error instanceof EnvironmentManifestError &&
+      error instanceof SceneManifestError &&
       error.code === "invalid-defaults" &&
       error.details.fieldName === "defaults.viewpoint.eye",
   );
 });
 
-test("rejects duplicate built-in environment ids", () => {
+test("rejects duplicate built-in scene ids", () => {
   assert.throws(
-    () => parseBuiltInEnvironmentManifest([...validManifest, ...validManifest]),
+    () => parseBuiltInSceneManifest([...validManifest, ...validManifest]),
     (error) =>
-      error instanceof EnvironmentManifestError &&
-      error.code === "duplicate-environment-id",
+      error instanceof SceneManifestError &&
+      error.code === "duplicate-scene-id",
   );
 });
 
-test("validates an uploaded environment folder with one splat and one mesh", () => {
-  const result = validateEnvironmentUploadFolder([
+test("validates an imported scene folder with one splat and one mesh", () => {
+  const result = validateSceneImportFolder([
     { name: "scene.spz", size: 100 },
     { name: "collision.glb", size: 200 },
   ]);
@@ -117,16 +117,16 @@ test("validates an uploaded environment folder with one splat and one mesh", () 
   assert.equal(result.collision.fileType, "glb");
 });
 
-test("rejects uploaded environment folders with extra files", () => {
+test("rejects imported scene folders with extra files", () => {
   assert.throws(
     () =>
-      validateEnvironmentUploadFolder([
+      validateSceneImportFolder([
         { name: "scene.spz", size: 100 },
         { name: "collision.glb", size: 200 },
         { name: "notes.txt", size: 10 },
       ]),
     (error) =>
-      error instanceof EnvironmentValidationError &&
+      error instanceof SceneValidationError &&
       error.code === "invalid-file-count",
   );
 });
@@ -134,57 +134,50 @@ test("rejects uploaded environment folders with extra files", () => {
 test("rejects uploaded files over the configured per-file size limit", () => {
   assert.throws(
     () =>
-      validateEnvironmentUploadFolder([
+      validateSceneImportFolder([
         {
           name: "scene.spz",
-          size: DEFAULT_MAX_ENVIRONMENT_FILE_SIZE_BYTES + 1,
+          size: DEFAULT_MAX_SCENE_FILE_SIZE_BYTES + 1,
         },
         { name: "collision.glb", size: 200 },
       ]),
     (error) =>
-      error instanceof EnvironmentValidationError &&
+      error instanceof SceneValidationError &&
       error.code === "file-too-large",
   );
 });
 
-test("creates a scene from an environment template", () => {
-  const [template] = parseBuiltInEnvironmentManifest(validManifest);
-  const scene = createSceneFromEnvironmentTemplate(template, {
+test("creates a scene from scene-owned assets", () => {
+  const [assets] = parseBuiltInSceneManifest(validManifest);
+  const scene = createSceneFromAssets(assets, {
     id: "scene-1",
     name: "Kitchen scene",
+    origin: "built-in",
+    builtInId: "kitchen",
   });
 
   assert.equal(scene.id, "scene-1");
   assert.equal(scene.name, "Kitchen scene");
-  assert.equal(scene.environment.templateId, "kitchen");
-  assert.deepEqual(scene.characters, []);
-  assert.deepEqual(scene.props, []);
+  assert.equal(scene.origin, "built-in");
+  assert.equal(scene.builtInId, "kitchen");
+  assert.equal(scene.assets.id, "kitchen");
+  assert.deepEqual(scene.objects, []);
   assert.deepEqual(scene.cameras, []);
   assert.deepEqual(scene.shots, []);
 });
 
-test("prevents changing a scene's environment template", () => {
-  const [template] = parseBuiltInEnvironmentManifest(validManifest);
-  const scene = createSceneFromEnvironmentTemplate(template);
-
-  assert.throws(
-    () => updateSceneEnvironmentSettings(scene, { templateId: "warehouse" }),
-    /cannot be changed/,
-  );
-});
-
-test("updates scene-instance environment settings without mutating template id", () => {
-  const [template] = parseBuiltInEnvironmentManifest(validManifest);
-  const scene = createSceneFromEnvironmentTemplate(template);
-  const updated = updateSceneEnvironmentSettings(scene, {
+test("updates scene world settings without mutating scene assets", () => {
+  const [assets] = parseBuiltInSceneManifest(validManifest);
+  const scene = createSceneFromAssets(assets);
+  const updated = updateSceneWorldSettings(scene, {
     opacity: 0.5,
     collision: { visibleInEditor: true, displayMode: "wireframe" },
   });
 
-  assert.equal(updated.environment.templateId, "kitchen");
-  assert.equal(updated.environment.opacity, 0.5);
-  assert.equal(updated.environment.collision.visibleInEditor, true);
-  assert.equal(updated.environment.collision.displayMode, "wireframe");
+  assert.equal(updated.assets.id, "kitchen");
+  assert.equal(updated.world.opacity, 0.5);
+  assert.equal(updated.world.collision.visibleInEditor, true);
+  assert.equal(updated.world.collision.displayMode, "wireframe");
 });
 
 test("uses camera-n naming and camera name storage keys", () => {

@@ -3,9 +3,9 @@ import react from "@vitejs/plugin-react";
 import { cpSync, existsSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 
-function copyEnvironmentAssets() {
+function copySceneAssets() {
   return {
-    name: "copy-environment-assets",
+    name: "copy-scene-assets",
     closeBundle() {
       const source = resolve(__dirname, "assets/environments");
       if (!existsSync(source)) return;
@@ -21,7 +21,7 @@ function copyEnvironmentAssets() {
 }
 
 export default defineConfig({
-  plugins: [react(), copyEnvironmentAssets()],
+  plugins: [react(), copySceneAssets()],
   server: {
     host: "127.0.0.1",
     port: 5173,
