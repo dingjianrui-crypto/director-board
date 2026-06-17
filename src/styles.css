@@ -375,12 +375,48 @@ h3 {
 .three-viewport {
   position: absolute;
   inset: 0;
+  overflow: hidden;
 }
 
 .three-viewport canvas {
+  position: absolute;
+  inset: 0;
   display: block;
   width: 100%;
   height: 100%;
+}
+
+.viewport-labels {
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+}
+
+.viewport-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  max-width: 160px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: rgba(8, 11, 16, 0.68);
+  color: #dfe8f5;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.35;
+  overflow: hidden;
+  text-align: center;
+  text-overflow: ellipsis;
+  text-shadow:
+    0 1px 1px rgba(0, 0, 0, 0.9),
+    0 0 5px rgba(0, 0, 0, 0.78);
+  white-space: nowrap;
+}
+
+.viewport-label-selected {
+  color: #ffffff;
+  background: rgba(39, 97, 166, 0.82);
 }
 
 .viewport-overlays {

@@ -146,6 +146,11 @@ type Viewpoint = {
   target: THREE.Vector3;
 };
 
+type ScreenLabelAnchor = {
+  element: HTMLSpanElement;
+  position: THREE.Vector3;
+};
+
 const SCAN_SCENE_SCALE = 3;
 const SPARK_PHYSICS_SPAWN_EYE = new THREE.Vector3(0, 1.48, 0);
 const SPARK_PHYSICS_SPAWN_TARGET = new THREE.Vector3(0, 1.48, 1);
@@ -193,6 +198,8 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
     const objectRootRef = useRef<THREE.Group | null>(null);
     const cameraRootRef = useRef<THREE.Group | null>(null);
     const labelRootRef = useRef<THREE.Group | null>(null);
+    const labelOverlayRef = useRef<HTMLDivElement | null>(null);
+    const screenLabelAnchorsRef = useRef<ScreenLabelAnchor[]>([]);
     const collisionMeshRef = useRef<THREE.Object3D | null>(null);
     const splatMeshRef = useRef<
       (THREE.Object3D & {
@@ -413,7 +420,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
         updateKeyboardNavigation(deltaTime);
         controls.update();
         publishEditorViewpoint(frameTime);
-        updateLabelFacing();
+        updateScreenLabels();
         updateCameraHandleFacing();
         void sparkRef.current?.update?.({ scene: threeScene, camera: editorCamera });
         renderer.render(threeScene, editorCamera);
@@ -443,6 +450,9 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
     useEffect(() => {
       gridRef.current!.visible = showGrid;
       labelRootRef.current!.visible = showLabels;
+      if (labelOverlayRef.current) {
+        labelOverlayRef.current.hidden = !showLabels;
+      }
     }, [showGrid, showLabels]);
 
     useEffect(() => {
@@ -2284,44 +2294,89 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
 
     function rebuildLabels() {
       const root = labelRootRef.current;
-      if (!root) return;
-      clearGroup(root);
+      if (root) clearGroup(root);
+      clearScreenLabels();
+
+      const overlay = labelOverlayRef.current;
+      if (!overlay) return;
       for (const object of latestRef.current.scene.objects) {
-        root.add(createLabel(object.name, object.position, 1.62));
+        const yOffset = object.kind === "character" ? 1.62 * object.scale : 1.62;
+        createScreenLabel(
+          object.name,
+          [
+            object.position[0],
+            object.position[1] + yOffset,
+            object.position[2],
+          ],
+          latestRef.current.selection.type === "object" &&
+            latestRef.current.selection.id === object.id,
+        );
       }
       for (const camera of latestRef.current.scene.cameras) {
-        root.add(createLabel(camera.name, camera.position, 0.36));
+        createScreenLabel(
+          camera.name,
+          [
+            camera.position[0],
+            camera.position[1] + 0.36,
+            camera.position[2],
+          ],
+          latestRef.current.selection.type === "camera" &&
+            latestRef.current.selection.id === camera.id,
+        );
       }
+      updateScreenLabels();
     }
 
-    function createLabel(text: string, position: [number, number, number], yOffset: number) {
-      const canvas = document.createElement("canvas");
-      canvas.width = 256;
-      canvas.height = 64;
-      const context = canvas.getContext("2d")!;
-      context.font = "600 26px Inter, Arial, sans-serif";
-      context.textAlign = "center";
-      context.textBaseline = "middle";
-      context.lineWidth = 5;
-      context.strokeStyle = "rgba(0,0,0,0.65)";
-      context.strokeText(text, 128, 32);
-      context.fillStyle = "#dfe8f5";
-      context.fillText(text, 128, 32);
-      const texture = new THREE.CanvasTexture(canvas);
-      const sprite = new THREE.Sprite(
-        new THREE.SpriteMaterial({ map: texture, transparent: true }),
-      );
-      sprite.position.set(position[0], position[1] + yOffset, position[2]);
-      sprite.scale.set(0.9, 0.225, 1);
-      return sprite;
+    function clearScreenLabels() {
+      for (const anchor of screenLabelAnchorsRef.current) {
+        anchor.element.remove();
+      }
+      screenLabelAnchorsRef.current = [];
     }
 
-    function updateLabelFacing() {
+    function createScreenLabel(
+      text: string,
+      position: [number, number, number],
+      selected: boolean,
+    ) {
+      const overlay = labelOverlayRef.current;
+      if (!overlay) return;
+
+      const element = document.createElement("span");
+      element.className = selected
+        ? "viewport-label viewport-label-selected"
+        : "viewport-label";
+      element.textContent = text;
+      overlay.appendChild(element);
+      screenLabelAnchorsRef.current.push({
+        element,
+        position: new THREE.Vector3(...position),
+      });
+    }
+
+    function updateScreenLabels() {
       const editorCamera = editorCameraRef.current;
-      const labelRoot = labelRootRef.current;
-      if (!editorCamera || !labelRoot) return;
-      for (const child of labelRoot.children) {
-        child.quaternion.copy(editorCamera.quaternion);
+      const renderer = rendererRef.current;
+      const overlay = labelOverlayRef.current;
+      if (!editorCamera || !renderer || !overlay) return;
+
+      const width = renderer.domElement.clientWidth;
+      const height = renderer.domElement.clientHeight;
+      const projected = new THREE.Vector3();
+
+      for (const anchor of screenLabelAnchorsRef.current) {
+        projected.copy(anchor.position).project(editorCamera);
+        const visible =
+          latestRef.current.showLabels &&
+          projected.z >= -1 &&
+          projected.z <= 1;
+
+        anchor.element.hidden = !visible;
+        if (!visible) continue;
+
+        anchor.element.style.transform = `translate(-50%, -100%) translate(${
+          ((projected.x + 1) / 2) * width
+        }px, ${((-projected.y + 1) / 2) * height}px)`;
       }
     }
 
@@ -2824,7 +2879,11 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       return camera;
     }
 
-    return <div className="three-viewport" ref={hostRef} />;
+    return (
+      <div className="three-viewport" ref={hostRef}>
+        <div className="viewport-labels" ref={labelOverlayRef} />
+      </div>
+    );
   },
 );
 
