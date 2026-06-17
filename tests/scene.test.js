@@ -75,6 +75,29 @@ test("parses built-in scene viewpoint defaults", () => {
   });
 });
 
+test("parses built-in scene splat transform defaults", () => {
+  const assets = parseBuiltInSceneManifest([
+    {
+      ...validManifest[0],
+      defaults: {
+        entityScale: 1.25,
+        splatTransform: {
+          axes: [1, 1, 1],
+          scale: 3,
+        },
+      },
+    },
+  ]);
+
+  assert.deepEqual(assets[0].defaults, {
+    entityScale: 1.25,
+    splatTransform: {
+      axes: [1, 1, 1],
+      scale: 3,
+    },
+  });
+});
+
 test("rejects invalid built-in scene viewpoint defaults", () => {
   assert.throws(
     () =>
@@ -93,6 +116,44 @@ test("rejects invalid built-in scene viewpoint defaults", () => {
       error instanceof SceneManifestError &&
       error.code === "invalid-defaults" &&
       error.details.fieldName === "defaults.viewpoint.eye",
+  );
+});
+
+test("rejects invalid built-in scene splat transform defaults", () => {
+  assert.throws(
+    () =>
+      parseBuiltInSceneManifest([
+        {
+          ...validManifest[0],
+          defaults: {
+            splatTransform: {
+              axes: [1, 0, 1],
+            },
+          },
+        },
+      ]),
+    (error) =>
+      error instanceof SceneManifestError &&
+      error.code === "invalid-defaults" &&
+      error.details.fieldName === "defaults.splatTransform.axes",
+  );
+});
+
+test("rejects invalid built-in scene entity scale defaults", () => {
+  assert.throws(
+    () =>
+      parseBuiltInSceneManifest([
+        {
+          ...validManifest[0],
+          defaults: {
+            entityScale: 0,
+          },
+        },
+      ]),
+    (error) =>
+      error instanceof SceneManifestError &&
+      error.code === "invalid-defaults" &&
+      error.details.fieldName === "defaults.entityScale",
   );
 });
 

@@ -85,6 +85,53 @@ function normalizeDefaults(defaults, index) {
   if (Object.hasOwn(defaults, "viewpoint")) {
     normalized.viewpoint = normalizeViewpoint(defaults.viewpoint, index);
   }
+  if (Object.hasOwn(defaults, "splatTransform")) {
+    normalized.splatTransform = normalizeSplatTransform(
+      defaults.splatTransform,
+      index,
+    );
+  }
+  if (Object.hasOwn(defaults, "entityScale")) {
+    if (!Number.isFinite(defaults.entityScale) || defaults.entityScale <= 0) {
+      throw new SceneManifestError(
+        `Manifest entry at index ${index} has invalid defaults.entityScale.`,
+        "invalid-defaults",
+        { index, fieldName: "defaults.entityScale" },
+      );
+    }
+    normalized.entityScale = defaults.entityScale;
+  }
+
+  return normalized;
+}
+
+function normalizeSplatTransform(transform, index) {
+  if (!transform || typeof transform !== "object" || Array.isArray(transform)) {
+    throw new SceneManifestError(
+      `Manifest entry at index ${index} has invalid defaults.splatTransform.`,
+      "invalid-defaults",
+      { index, fieldName: "defaults.splatTransform" },
+    );
+  }
+
+  const normalized = {};
+  if (Object.hasOwn(transform, "axes")) {
+    normalized.axes = normalizeAxisSigns(
+      transform.axes,
+      "defaults.splatTransform.axes",
+      index,
+    );
+  }
+  if (Object.hasOwn(transform, "scale")) {
+    if (!Number.isFinite(transform.scale) || transform.scale <= 0) {
+      throw new SceneManifestError(
+        `Manifest entry at index ${index} has invalid defaults.splatTransform.scale.`,
+        "invalid-defaults",
+        { index, fieldName: "defaults.splatTransform.scale" },
+      );
+    }
+    normalized.scale = transform.scale;
+  }
 
   return normalized;
 }
@@ -122,6 +169,19 @@ function normalizeVector3(value, fieldName, index) {
   }
 
   return [...value];
+}
+
+function normalizeAxisSigns(value, fieldName, index) {
+  const axes = normalizeVector3(value, fieldName, index);
+  if (axes.some((coordinate) => coordinate !== -1 && coordinate !== 1)) {
+    throw new SceneManifestError(
+      `Manifest entry at index ${index} has invalid ${fieldName}.`,
+      "invalid-defaults",
+      { index, fieldName },
+    );
+  }
+
+  return axes;
 }
 
 function normalizeAsset(asset, supportedTypes, fieldName, index) {

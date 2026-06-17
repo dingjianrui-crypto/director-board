@@ -51,7 +51,13 @@ import type {
   Vector3Tuple,
   ViewMode,
 } from "./types";
-import { ThreeViewport, type ThreeViewportHandle } from "./ThreeViewport";
+import {
+  ThreeViewport,
+  type CollisionAlignmentReadout,
+  type SceneSizingReadout,
+  type SplatAlignmentReadout,
+  type ThreeViewportHandle,
+} from "./ThreeViewport";
 
 const frameOptions = ["EWS", "WS", "FS", "MS", "MCU", "CU", "ECU", "OTS"];
 const lensOptions = [14, 18, 24, 28, 35, 50, 65, 85, 100, 135];
@@ -81,6 +87,15 @@ export function App() {
     sceneId: string;
     viewpoint: EditorViewpoint;
   }>();
+  const [collisionAlignments, setCollisionAlignments] = useState<
+    Record<string, CollisionAlignmentReadout | undefined>
+  >({});
+  const [splatAlignments, setSplatAlignments] = useState<
+    Record<string, SplatAlignmentReadout | undefined>
+  >({});
+  const [sceneSizings, setSceneSizings] = useState<
+    Record<string, SceneSizingReadout | undefined>
+  >({});
   const [status, setStatus] = useState("Ready");
 
   useEffect(() => {
@@ -149,6 +164,9 @@ export function App() {
     editorViewpoint?.sceneId === activeScene.id
       ? editorViewpoint.viewpoint
       : undefined;
+  const currentCollisionAlignment = collisionAlignments[activeScene.id];
+  const currentSplatAlignment = splatAlignments[activeScene.id];
+  const currentSceneSizing = sceneSizings[activeScene.id];
 
   const sceneListLabel = useMemo(
     () => `${sceneList.length} scene${sceneList.length === 1 ? "" : "s"}`,
@@ -315,7 +333,7 @@ export function App() {
       color: kind === "character" ? "#7fc8a9" : "#b78b60",
       position: [0.4 + index * 0.18, 0, 0.6],
       rotationY: 0,
-      scale: 1,
+      scale: getNewObjectScale(activeScene, currentSceneSizing),
     };
 
     updateScene((scene) => ({ ...scene, objects: [...scene.objects, object] }));
@@ -692,6 +710,36 @@ export function App() {
             onSelect={setSelection}
             onUpdateCamera={updateCamera}
             onUpdateObject={updateObject}
+            onSplatAlignmentChange={(sceneId, alignment) =>
+              setSplatAlignments((current) => {
+                const existing = current[sceneId];
+                if (splatAlignmentsEqual(existing, alignment)) return current;
+                return {
+                  ...current,
+                  [sceneId]: alignment,
+                };
+              })
+            }
+            onCollisionAlignmentChange={(sceneId, alignment) =>
+              setCollisionAlignments((current) => {
+                const existing = current[sceneId];
+                if (collisionAlignmentsEqual(existing, alignment)) return current;
+                return {
+                  ...current,
+                  [sceneId]: alignment,
+                };
+              })
+            }
+            onSceneSizingChange={(sceneId, sizing) =>
+              setSceneSizings((current) => {
+                const existing = current[sceneId];
+                if (sceneSizingsEqual(existing, sizing)) return current;
+                return {
+                  ...current,
+                  [sceneId]: sizing,
+                };
+              })
+            }
             onViewpointChange={(viewpoint) =>
               setEditorViewpoint({
                 sceneId: activeScene.id,
@@ -701,9 +749,17 @@ export function App() {
             onStatus={setStatus}
           />
           <div className="viewport-overlays">
-            <ViewpointReadout
-              viewpoint={currentEditorViewpoint}
-            />
+            <div className="viewport-readout-stack">
+              <ViewpointReadout
+                viewpoint={currentEditorViewpoint}
+              />
+              <ScaleReadout
+                scene={activeScene}
+                splatAlignment={currentSplatAlignment}
+                collisionAlignment={currentCollisionAlignment}
+                sceneSizing={currentSceneSizing}
+              />
+            </div>
             <div className="view-chip">
               <Grid3X3 size={13} />
               <label>
@@ -732,6 +788,8 @@ export function App() {
               onUpdateName={updateSceneName}
               onUpdateSlug={updateSceneSlug}
               onUpdateWorld={updateWorld}
+              collisionAlignment={currentCollisionAlignment}
+              sceneSizing={currentSceneSizing}
               onDelete={deleteScene}
             />
           )}
@@ -1011,12 +1069,13 @@ function ObjectInspector({
         <span>Scale</span>
         <input
           type="range"
-          min="0.5"
-          max="1.8"
+          min="0.1"
+          max="4"
           step="0.05"
           value={object.scale}
           onChange={(event) => onUpdate(object.id, { scale: Number(event.target.value) })}
         />
+        <small>{object.scale.toFixed(2)}</small>
       </label>
       <label className="field">
         <span>Color</span>
@@ -1031,12 +1090,16 @@ function SceneInspector({
   onUpdateName,
   onUpdateSlug,
   onUpdateWorld,
+  collisionAlignment,
+  sceneSizing,
   onDelete,
 }: {
   scene: DirectorScene;
   onUpdateName: (name: string) => void;
   onUpdateSlug: (slug: string) => void;
   onUpdateWorld: (patch: Partial<DirectorScene["world"]>) => void;
+  collisionAlignment?: CollisionAlignmentReadout;
+  sceneSizing?: SceneSizingReadout;
   onDelete: (scene: DirectorScene) => void;
 }) {
   return (
@@ -1047,6 +1110,30 @@ function SceneInspector({
         <span>Assets</span>
         <strong>{scene.assets.name}</strong>
         <small>{scene.origin} · {scene.assets.source}</small>
+      </div>
+      {scene.assets.collision && (
+        <div className="readonly-block">
+          <span>Collider Scale</span>
+          <strong>
+            {collisionAlignment
+              ? `${collisionAlignment.scale.toFixed(3)}x`
+              : "Auto"}
+          </strong>
+          <small>
+            {collisionAlignment
+              ? `${formatAxisSigns(collisionAlignment.axes)} · score ${collisionAlignment.score.toFixed(2)}`
+              : "waiting for assets"}
+          </small>
+        </div>
+      )}
+      <div className="readonly-block">
+        <span>Object Scale</span>
+        <strong>{(sceneSizing?.entityScale ?? getNewObjectScale(scene)).toFixed(3)}x</strong>
+        <small>
+          {sceneSizing
+            ? `${sceneSizing.source} · span ${sceneSizing.horizontalSpan.toFixed(2)}`
+            : "waiting for scene size"}
+        </small>
       </div>
       <VectorEditor
         label="Position"
@@ -1260,6 +1347,65 @@ function CameraPreview({
   );
 }
 
+function ScaleReadout({
+  scene,
+  splatAlignment,
+  collisionAlignment,
+  sceneSizing,
+}: {
+  scene: DirectorScene;
+  splatAlignment?: SplatAlignmentReadout;
+  collisionAlignment?: CollisionAlignmentReadout;
+  sceneSizing?: SceneSizingReadout;
+}) {
+  const worldScale = scene.world.transform.scale;
+  const splatScale = splatAlignment
+    ? formatScaleTuple(
+        splatAlignment.axes.map(
+          (axis) => axis * splatAlignment.scale * worldScale,
+        ) as Vector3Tuple,
+      )
+    : undefined;
+  const colliderScale = collisionAlignment
+    ? formatScaleTuple(
+        collisionAlignment.axes.map(
+          (axis) => axis * collisionAlignment.scale * worldScale,
+        ) as Vector3Tuple,
+      )
+    : undefined;
+
+  if (!splatScale && !scene.assets.collision) return null;
+
+  return (
+    <div
+      className="viewpoint-readout scale-readout"
+      onPointerDown={(event) => event.stopPropagation()}
+    >
+      <div className="viewpoint-head">
+        <strong>Scale</strong>
+      </div>
+      <div className="viewpoint-fields">
+        {scene.assets.splat && (
+          <ViewpointValue
+            label="splat"
+            value={splatScale ?? "waiting"}
+          />
+        )}
+        {scene.assets.collision && (
+          <ViewpointValue
+            label="mesh"
+            value={colliderScale ?? "waiting"}
+          />
+        )}
+        <ViewpointValue
+          label="object"
+          value={`${(sceneSizing?.entityScale ?? getNewObjectScale(scene)).toFixed(3)}x`}
+        />
+      </div>
+    </div>
+  );
+}
+
 function LabeledInput({
   label,
   value,
@@ -1359,6 +1505,68 @@ function degreesToRadians(value: number) {
 
 function formatTuple(tuple: Vector3Tuple) {
   return `[${tuple.map((value) => value.toFixed(4)).join(", ")}]`;
+}
+
+function formatScaleTuple(tuple: Vector3Tuple) {
+  return `[${tuple.map((value) => value.toFixed(3)).join(", ")}]`;
+}
+
+function formatAxisSigns(axes: CollisionAlignmentReadout["axes"]) {
+  const labels = ["X", "Y", "Z"];
+  return axes
+    .map((axis, index) => `${axis < 0 ? "-" : "+"}${labels[index]}`)
+    .join(" ");
+}
+
+function collisionAlignmentsEqual(
+  a: CollisionAlignmentReadout | undefined,
+  b: CollisionAlignmentReadout | undefined,
+) {
+  if (!a || !b) return a === b;
+  return (
+    Math.abs(a.scale - b.scale) < 0.0005 &&
+    Math.abs(a.score - b.score) < 0.0005 &&
+    a.source === b.source &&
+    a.axes.every((axis, index) => axis === b.axes[index])
+  );
+}
+
+function splatAlignmentsEqual(
+  a: SplatAlignmentReadout | undefined,
+  b: SplatAlignmentReadout | undefined,
+) {
+  if (!a || !b) return a === b;
+  return (
+    Math.abs(a.scale - b.scale) < 0.0005 &&
+    Math.abs(a.score - b.score) < 0.0005 &&
+    a.source === b.source &&
+    a.axes.every((axis, index) => axis === b.axes[index])
+  );
+}
+
+function sceneSizingsEqual(
+  a: SceneSizingReadout | undefined,
+  b: SceneSizingReadout | undefined,
+) {
+  if (!a || !b) return a === b;
+  return (
+    Math.abs(a.entityScale - b.entityScale) < 0.0005 &&
+    Math.abs(a.horizontalSpan - b.horizontalSpan) < 0.0005 &&
+    a.source === b.source &&
+    a.size.every((value, index) => Math.abs(value - b.size[index]) < 0.0005)
+  );
+}
+
+function getNewObjectScale(
+  scene: DirectorScene,
+  sceneSizing?: SceneSizingReadout,
+) {
+  const scale = scene.assets.defaults?.entityScale ?? sceneSizing?.entityScale ?? 1;
+  return Number(clampNumber(scale, 0.1, 10).toFixed(3));
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
 }
 
 function modelName(model: string, index: number) {

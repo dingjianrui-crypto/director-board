@@ -389,14 +389,21 @@ h3 {
   inset: 0;
 }
 
-.viewpoint-readout {
+.viewport-readout-stack {
   pointer-events: auto;
-  user-select: text;
   position: absolute;
   top: 14px;
   left: 14px;
-  width: max-content;
+  display: grid;
+  gap: 8px;
   max-width: calc(100% - 28px);
+}
+
+.viewpoint-readout {
+  user-select: text;
+  position: relative;
+  width: max-content;
+  max-width: 100%;
   padding: 7px 8px;
   border: 1px solid #303847;
   border-radius: 7px;
@@ -429,6 +436,10 @@ h3 {
   grid-template-columns: 42px max-content;
   align-items: center;
   gap: 6px;
+}
+
+.scale-readout .viewpoint-field {
+  grid-template-columns: 38px max-content;
 }
 
 .viewpoint-field span {

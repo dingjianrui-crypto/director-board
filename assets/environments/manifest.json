@@ -18,5 +18,26 @@
         "target": [-1.5351, -0.1019, 8.5312]
       }
     }
+  },
+  {
+    "id": "living-room",
+    "name": "Living Room",
+    "splat": {
+      "path": "/assets/environments/livingroom/living_room_splat.spz",
+      "sizeBytes": 28249472,
+      "fileType": "spz"
+    },
+    "collision": {
+      "path": "/assets/environments/livingroom/living_room_collider.glb",
+      "sizeBytes": 2698592,
+      "fileType": "glb"
+    },
+    "defaults": {
+      "splatTransform": {
+        "axes": [1, 1, 1],
+        "scale": 3
+      },
+      "entityScale": 2.2
+    }
   }
 ]

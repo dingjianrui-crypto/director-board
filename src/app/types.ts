@@ -34,6 +34,11 @@ export type SceneAssets = {
     opacity: number;
     renderMode: "auto" | "quality" | "balanced" | "fast";
     gridY: number;
+    entityScale: number;
+    splatTransform: Partial<{
+      axes: Vector3Tuple;
+      scale: number;
+    }>;
     collision: Partial<{
       visibleInEditor: boolean;
       displayMode: "hidden" | "wireframe" | "transparent" | "walkable";

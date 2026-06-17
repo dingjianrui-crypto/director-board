@@ -219,6 +219,14 @@ export function cloneSceneAssets(assets: SceneAssets): SceneAssets {
                 target: [...assets.defaults.viewpoint.target],
               }
             : undefined,
+          splatTransform: assets.defaults.splatTransform
+            ? {
+                ...assets.defaults.splatTransform,
+                axes: assets.defaults.splatTransform.axes
+                  ? [...assets.defaults.splatTransform.axes]
+                  : undefined,
+              }
+            : undefined,
           collision: assets.defaults.collision
             ? { ...assets.defaults.collision }
             : undefined,

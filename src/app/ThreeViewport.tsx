@@ -33,6 +33,22 @@ type SparkModule = {
   };
 };
 
+type LoadedGltf = {
+  asset?: {
+    generator?: string;
+  };
+  parser?: {
+    json?: {
+      asset?: {
+        generator?: string;
+      };
+      nodes?: Array<{
+        matrix?: number[];
+      }>;
+    };
+  };
+};
+
 export type ThreeViewportHandle = {
   capture: (
     cameraId: string,
@@ -41,6 +57,27 @@ export type ThreeViewportHandle = {
       height?: number;
     },
   ) => string | undefined;
+};
+
+export type CollisionAlignmentReadout = {
+  scale: number;
+  axes: [number, number, number];
+  score: number;
+  source: "splat-bounds" | "splat-transform" | "default";
+};
+
+export type SplatAlignmentReadout = {
+  scale: number;
+  axes: [number, number, number];
+  score: number;
+  source: "auto" | "default" | "manifest";
+};
+
+export type SceneSizingReadout = {
+  entityScale: number;
+  horizontalSpan: number;
+  size: [number, number, number];
+  source: "collision" | "splat" | "manifest" | "default";
 };
 
 type Props = {
@@ -52,6 +89,18 @@ type Props = {
   onSelect: (selection: Selection) => void;
   onUpdateCamera: (cameraId: string, patch: Partial<DirectorCamera>) => void;
   onUpdateObject: (objectId: string, patch: Partial<BoardObject>) => void;
+  onSplatAlignmentChange: (
+    sceneId: string,
+    alignment: SplatAlignmentReadout | undefined,
+  ) => void;
+  onCollisionAlignmentChange: (
+    sceneId: string,
+    alignment: CollisionAlignmentReadout | undefined,
+  ) => void;
+  onSceneSizingChange: (
+    sceneId: string,
+    sizing: SceneSizingReadout | undefined,
+  ) => void;
   onViewpointChange: (viewpoint: EditorViewpoint) => void;
   onStatus: (message: string) => void;
 };
@@ -108,6 +157,12 @@ const HUMAN_GROUND_RAY_HEADROOM = 0.25;
 const KEYBOARD_NAV_SPEED = 1.4;
 const KEYBOARD_NAV_VERTICAL_LOOK_THRESHOLD = 0.18;
 const DEFAULT_CAPTURE_SIZE = { width: 1440, height: 1080 };
+const PLACEABLE_SURFACE_MIN_UP = Math.cos(THREE.MathUtils.degToRad(35));
+const COLLISION_FLOOR_BAND_MIN_HEIGHT = 0.08;
+const COLLISION_FLOOR_LOW_QUANTILE = 0.05;
+const REFERENCE_SCENE_HORIZONTAL_SPAN = 52;
+const MIN_ADAPTIVE_ENTITY_SCALE = 0.55;
+const MAX_ADAPTIVE_ENTITY_SCALE = 3;
 
 export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
   function ThreeViewport(
@@ -120,6 +175,9 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       onSelect,
       onUpdateCamera,
       onUpdateObject,
+      onSplatAlignmentChange,
+      onCollisionAlignmentChange,
+      onSceneSizingChange,
       onViewpointChange,
       onStatus,
     },
@@ -136,7 +194,14 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
     const cameraRootRef = useRef<THREE.Group | null>(null);
     const labelRootRef = useRef<THREE.Group | null>(null);
     const collisionMeshRef = useRef<THREE.Object3D | null>(null);
-    const splatMeshRef = useRef<(THREE.Object3D & { dispose?: () => void }) | null>(null);
+    const splatMeshRef = useRef<
+      (THREE.Object3D & {
+        dispose?: () => void;
+        getBoundingBox?: (centersOnly?: boolean) => THREE.Box3;
+      }) | null
+    >(null);
+    const splatBoundsRef = useRef<THREE.Box3 | null>(null);
+    const splatAlignmentRef = useRef<SplatAlignmentReadout | null>(null);
     const autoGridYRef = useRef<number | null>(null);
     const sparkRef = useRef<
       (THREE.Object3D & {
@@ -150,11 +215,16 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
     const dragStateRef = useRef<CameraDragState | null>(null);
     const hoveredObjectHandleRef = useRef<ObjectHandle | null>(null);
     const objectDragStateRef = useRef<ObjectDragState | null>(null);
+    const collisionWalkableFloorRef = useRef<{
+      key: string;
+      y: number | undefined;
+    } | null>(null);
     const lastViewpointPublishRef = useRef<{
       time: number;
       key: string;
     } | null>(null);
     const keyboardNavKeysRef = useRef(new Set<string>());
+    const collisionSnappedObjectKeysRef = useRef(new Set<string>());
     const framedSceneRef = useRef<{
       key: string;
       priority: number;
@@ -169,6 +239,9 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       onSelect,
       onUpdateCamera,
       onUpdateObject,
+      onSplatAlignmentChange,
+      onCollisionAlignmentChange,
+      onSceneSizingChange,
       onViewpointChange,
       onStatus,
     });
@@ -182,6 +255,9 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       onSelect,
       onUpdateCamera,
       onUpdateObject,
+      onSplatAlignmentChange,
+      onCollisionAlignmentChange,
+      onSceneSizingChange,
       onViewpointChange,
       onStatus,
     };
@@ -367,6 +443,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
     }, [scene.world.gridY, scene.world.transform.position]);
 
     useEffect(() => {
+      snapSceneObjectsToCollisionSurface();
       rebuildObjects();
       rebuildCameras();
       rebuildLabels();
@@ -379,31 +456,33 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       clearGroup(root);
       splatMeshRef.current?.dispose?.();
       splatMeshRef.current = null;
+      splatBoundsRef.current = null;
+      splatAlignmentRef.current = null;
       collisionMeshRef.current = null;
       autoGridYRef.current = null;
+      latestRef.current.onSplatAlignmentChange(scene.id, undefined);
+      latestRef.current.onCollisionAlignmentChange(scene.id, undefined);
+      latestRef.current.onSceneSizingChange(scene.id, undefined);
 
       applySceneWorldTransform(root);
       alignGridToSceneGround(root);
-
-      if (!scene.world.visible) {
-        return;
-      }
 
       frameEditorCameraAtSparkPhysicsSpawn(root);
       frameEditorCameraAtManifestViewpoint();
 
       if (scene.assets.splat) {
         await loadSplat(root);
-      } else {
+      } else if (scene.world.visible && scene.assets.source !== "blank") {
         buildProceduralKitchen(root);
       }
 
       if (scene.assets.collision) {
         await loadCollisionMesh(root);
-      } else {
+      } else if (scene.assets.source === "procedural") {
         const collision = buildProceduralCollision();
         root.add(collision);
         collisionMeshRef.current = collision;
+        publishSceneSizing("collision");
       }
     }
 
@@ -481,12 +560,24 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
           },
           onLoad: () => latestRef.current.onStatus("Scene splat ready"),
         });
-        splat.opacity = latestRef.current.scene.world.opacity;
-        applySplatCoordinateFix(splat);
+        splat.visible = latestRef.current.scene.world.visible;
+        splat.opacity = latestRef.current.scene.world.visible
+          ? latestRef.current.scene.world.opacity
+          : 0;
+        const alignment = applySplatCoordinateFix(splat);
         root.add(splat);
         splatMeshRef.current = splat;
+        splatAlignmentRef.current = alignment;
+        latestRef.current.onSplatAlignmentChange(
+          latestRef.current.scene.id,
+          alignment,
+        );
         await splat.initialized?.catch(() => undefined);
-        void retryFrameEditorCameraInsideSplat(root, splat);
+        updateSplatBounds(splat);
+        publishSceneSizing("splat");
+        if (latestRef.current.scene.world.visible) {
+          void retryFrameEditorCameraInsideSplat(root, splat);
+        }
       } catch (error) {
         latestRef.current.onStatus("Splat load failed; showing collision/blockout fallback.");
         buildProceduralKitchen(root);
@@ -519,6 +610,25 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       if (!isUsableBox(bounds)) return false;
 
       return frameEditorCameraInsideBounds(bounds, "splat");
+    }
+
+    function updateSplatBounds(
+      splat: THREE.Object3D & { getBoundingBox?: (centersOnly?: boolean) => THREE.Box3 },
+    ) {
+      if (!splat.getBoundingBox) {
+        splatBoundsRef.current = null;
+        return;
+      }
+
+      const bounds = splat.getBoundingBox(true).clone();
+      if (!isUsableBox(bounds)) {
+        splatBoundsRef.current = null;
+        return;
+      }
+
+      splat.updateMatrix();
+      bounds.applyMatrix4(splat.matrix);
+      splatBoundsRef.current = isUsableBox(bounds) ? bounds : null;
     }
 
     function frameEditorCameraInsideObject(
@@ -954,7 +1064,18 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
         const gltf = await loader.loadAsync(url);
         const collision = gltf.scene;
         collision.name = "CollisionMesh";
-        applyCollisionCoordinateFix(collision);
+        collision.userData.gltfAsset = getLoadedGltfAsset(gltf as LoadedGltf);
+        collision.userData.gltfRootMatrix = getLoadedGltfRootMatrix(
+          gltf as LoadedGltf,
+        );
+        const splatAlignment = applyDetectedSplatCoordinateFix(collision);
+        if (splatAlignment) {
+          latestRef.current.onSplatAlignmentChange(
+            latestRef.current.scene.id,
+            splatAlignment,
+          );
+        }
+        const alignment = applyCollisionCoordinateFix(collision);
         collision.traverse((node) => {
           const mesh = node as THREE.Mesh;
           if (!mesh.isMesh) return;
@@ -964,15 +1085,96 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
         });
         root.add(collision);
         collisionMeshRef.current = collision;
+        latestRef.current.onCollisionAlignmentChange(
+          latestRef.current.scene.id,
+          alignment,
+        );
+        publishSceneSizing("collision");
         frameEditorCameraInsideObject(collision, "collision");
+        snapSceneObjectsToCollisionSurface();
       } catch (error) {
         latestRef.current.onStatus("Collision mesh load failed; placement falls back to floor plane.");
         const fallback = buildProceduralCollision();
-        applyCollisionCoordinateFix(fallback);
+        const alignment = applyCollisionCoordinateFix(fallback);
         root.add(fallback);
         collisionMeshRef.current = fallback;
+        latestRef.current.onCollisionAlignmentChange(
+          latestRef.current.scene.id,
+          alignment,
+        );
+        publishSceneSizing("collision");
         frameEditorCameraInsideObject(fallback, "collision");
+        snapSceneObjectsToCollisionSurface();
       }
+    }
+
+    function publishSceneSizing(preferredSource: "collision" | "splat") {
+      const sizingBounds = getSceneSizingBounds(preferredSource);
+      const manifestScale = latestRef.current.scene.assets.defaults?.entityScale;
+      const hasManifestScale =
+        Number.isFinite(manifestScale) && manifestScale !== undefined && manifestScale > 0;
+
+      if (!sizingBounds) {
+        latestRef.current.onSceneSizingChange(latestRef.current.scene.id, {
+          entityScale: hasManifestScale ? manifestScale : 1,
+          horizontalSpan: 0,
+          size: [0, 0, 0],
+          source: hasManifestScale ? "manifest" : "default",
+        });
+        return;
+      }
+
+      const size = sizingBounds.bounds.getSize(new THREE.Vector3());
+      const horizontalSpan = getHorizontalSpan(size);
+      latestRef.current.onSceneSizingChange(latestRef.current.scene.id, {
+        entityScale: hasManifestScale
+          ? manifestScale
+          : getAdaptiveEntityScale(horizontalSpan),
+        horizontalSpan,
+        size: vectorToTuple(size),
+        source: hasManifestScale ? "manifest" : sizingBounds.source,
+      });
+    }
+
+    function getSceneSizingBounds(preferredSource: "collision" | "splat") {
+      const collisionBounds = getCollisionWorldBounds();
+      const splatBounds = getSplatWorldBounds();
+      const preferredBounds =
+        preferredSource === "collision" ? collisionBounds : splatBounds;
+      const fallbackBounds =
+        preferredSource === "collision" ? splatBounds : collisionBounds;
+
+      return preferredBounds ?? fallbackBounds;
+    }
+
+    function getCollisionWorldBounds() {
+      const collision = collisionMeshRef.current;
+      if (!collision) return undefined;
+
+      const bounds = new THREE.Box3().setFromObject(collision);
+      return isUsableBox(bounds)
+        ? {
+            bounds,
+            source: "collision" as const,
+          }
+        : undefined;
+    }
+
+    function getSplatWorldBounds() {
+      const splat = splatMeshRef.current;
+      if (!splat?.getBoundingBox) return undefined;
+
+      const bounds = splat.getBoundingBox(true).clone();
+      if (!isUsableBox(bounds)) return undefined;
+
+      splat.updateWorldMatrix(true, false);
+      bounds.applyMatrix4(splat.matrixWorld);
+      return isUsableBox(bounds)
+        ? {
+            bounds,
+            source: "splat" as const,
+          }
+        : undefined;
     }
 
     function buildProceduralKitchen(root: THREE.Group) {
@@ -1049,27 +1251,238 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       });
     }
 
-    function applySplatCoordinateFix(splat: THREE.Object3D) {
-      if (!usesScanSceneCoordinateFix()) return;
-
-      applyScanSceneCoordinateFix(splat);
+    function applySplatCoordinateFix(
+      splat: THREE.Object3D,
+      alignment = getManifestSplatAlignment() ?? getDefaultSplatAlignment(),
+    ): SplatAlignmentReadout {
+      splat.scale.set(
+        alignment.axes[0] * alignment.scale,
+        alignment.axes[1] * alignment.scale,
+        alignment.axes[2] * alignment.scale,
+      );
+      return alignment;
     }
 
-    function applyCollisionCoordinateFix(collision: THREE.Object3D) {
-      if (!usesScanSceneCoordinateFix()) return;
+    function applyDetectedSplatCoordinateFix(
+      collision: THREE.Object3D,
+    ): SplatAlignmentReadout | undefined {
+      const splat = splatMeshRef.current;
+      if (!splat || !usesScanSceneCoordinateFix()) return undefined;
 
-      applyScanSceneCoordinateFix(collision);
+      const alignment = findBestSplatAlignment(collision);
+      applySplatCoordinateFix(splat, alignment);
+      splatAlignmentRef.current = alignment;
+      updateSplatBounds(splat);
+      return alignment;
+    }
+
+    function getDefaultSplatAlignment(): SplatAlignmentReadout {
+      if (!usesScanSceneCoordinateFix()) {
+        return {
+          scale: 1,
+          axes: [1, 1, 1],
+          score: 0,
+          source: "default",
+        };
+      }
+
+      return {
+        scale: SCAN_SCENE_SCALE,
+        axes: [1, -1, 1],
+        score: 0,
+        source: "default",
+      };
+    }
+
+    function getManifestSplatAlignment() {
+      const override = latestRef.current.scene.assets.defaults?.splatTransform;
+      if (!override) return undefined;
+
+      const fallback = getDefaultSplatAlignment();
+      return {
+        scale: override.scale ?? fallback.scale,
+        axes: override.axes ?? fallback.axes,
+        score: 0,
+        source: "manifest",
+      } satisfies SplatAlignmentReadout;
+    }
+
+    function findBestSplatAlignment(
+      collision: THREE.Object3D,
+    ): SplatAlignmentReadout {
+      const manifestAlignment = getManifestSplatAlignment();
+      if (manifestAlignment) return manifestAlignment;
+      const splat = splatMeshRef.current;
+      if (!splat?.getBoundingBox) return getDefaultSplatAlignment();
+
+      const rawSplatBounds = splat.getBoundingBox(true).clone();
+      if (!isUsableBox(rawSplatBounds)) return getDefaultSplatAlignment();
+
+      const preferredAxes = inferSplatAxesFromCollision(collision);
+      const candidates = getAxisSignCandidates().map((axes) => {
+        const splatBounds = transformBox(
+          rawSplatBounds,
+          new THREE.Matrix4().makeScale(
+            axes[0] * SCAN_SCENE_SCALE,
+            axes[1] * SCAN_SCENE_SCALE,
+            axes[2] * SCAN_SCENE_SCALE,
+          ),
+        );
+        const collisionAlignment = findBestCollisionAlignmentForBounds(
+          collision,
+          splatBounds,
+        );
+        const viewpointScore = getSplatViewpointScore(splatBounds);
+        const preferenceScore = axesMatch(axes, preferredAxes) ? 0 : 0.35;
+
+        return {
+          scale: SCAN_SCENE_SCALE,
+          axes,
+          score: collisionAlignment.score + viewpointScore + preferenceScore,
+          source: "auto",
+        } satisfies SplatAlignmentReadout;
+      });
+
+      return candidates.reduce(
+        (best, candidate) => (candidate.score < best.score ? candidate : best),
+        candidates[0] ?? getDefaultSplatAlignment(),
+      );
+    }
+
+    function inferSplatAxesFromCollision(collision: THREE.Object3D) {
+      const generator = getCollisionGenerator(collision);
+      if (
+        generator.includes("THREE.GLTFExporter") ||
+        hasThreeExporterRootFlip(collision)
+      ) {
+        return [1, 1, 1] satisfies [number, number, number];
+      }
+
+      return getDefaultSplatAlignment().axes;
+    }
+
+    function getCollisionGenerator(collision: THREE.Object3D) {
+      const asset = collision.userData.gltfAsset as { generator?: string } | undefined;
+      return asset?.generator ?? "";
+    }
+
+    function getLoadedGltfAsset(gltf: LoadedGltf) {
+      return gltf.asset ?? gltf.parser?.json?.asset;
+    }
+
+    function getLoadedGltfRootMatrix(gltf: LoadedGltf) {
+      return gltf.parser?.json?.nodes?.[0]?.matrix;
+    }
+
+    function hasThreeExporterRootFlip(collision: THREE.Object3D) {
+      const matrix = collision.userData.gltfRootMatrix as number[] | undefined;
+      if (!Array.isArray(matrix) || matrix.length !== 16) return false;
+
+      return matrix[0] > 0 && matrix[5] < 0 && matrix[10] < 0;
+    }
+
+    function getSplatViewpointScore(bounds: THREE.Box3) {
+      const viewpoint = latestRef.current.scene.assets.defaults?.viewpoint;
+      if (!viewpoint || !isUsableBox(bounds)) return 0;
+
+      const size = bounds.getSize(new THREE.Vector3());
+      if (size.y <= 0) return 0;
+
+      const normalizedEyeY = (viewpoint.eye[1] - bounds.min.y) / size.y;
+      return Math.abs(normalizedEyeY - 0.22) * 2;
+    }
+
+    function applyCollisionCoordinateFix(
+      collision: THREE.Object3D,
+    ): CollisionAlignmentReadout {
+      if (!usesScanSceneCoordinateFix()) {
+        collision.scale.setScalar(1);
+        return {
+          scale: 1,
+          axes: [1, 1, 1],
+          score: 0,
+          source: "default",
+        };
+      }
+
+      const alignment = findBestCollisionAlignment(collision);
+
+      collision.scale.set(
+        alignment.axes[0] * alignment.scale,
+        alignment.axes[1] * alignment.scale,
+        alignment.axes[2] * alignment.scale,
+      );
+      return alignment;
     }
 
     function usesScanSceneCoordinateFix() {
       return latestRef.current.scene.assets.source !== "procedural";
     }
 
-    function applyScanSceneCoordinateFix(object: THREE.Object3D) {
-      object.scale.set(
-        SCAN_SCENE_SCALE,
-        -SCAN_SCENE_SCALE,
-        SCAN_SCENE_SCALE,
+    function findBestCollisionAlignment(
+      collision: THREE.Object3D,
+    ): CollisionAlignmentReadout {
+      const targetBounds = splatBoundsRef.current;
+
+      if (!targetBounds || !isUsableBox(targetBounds)) {
+        return getCollisionFallbackAlignment();
+      }
+
+      return findBestCollisionAlignmentForBounds(collision, targetBounds);
+    }
+
+    function getCollisionFallbackAlignment(): CollisionAlignmentReadout {
+      const manifestAlignment = getManifestSplatAlignment();
+      if (!usesScanSceneCoordinateFix() || !manifestAlignment) {
+        return {
+          scale: 1,
+          axes: [1, 1, 1],
+          score: 0,
+          source: "default",
+        };
+      }
+
+      return {
+        scale: manifestAlignment.scale,
+        axes: [...manifestAlignment.axes],
+        score: 0,
+        source: "splat-transform",
+      };
+    }
+
+    function findBestCollisionAlignmentForBounds(
+      collision: THREE.Object3D,
+      targetBounds: THREE.Box3,
+    ): CollisionAlignmentReadout {
+      const candidates: CollisionAlignmentReadout[] = [];
+      const originalScale = collision.scale.clone();
+
+      try {
+        for (const axes of getAxisSignCandidates()) {
+          collision.scale.set(...axes);
+          collision.updateWorldMatrix(true, true);
+          const sourceBounds = new THREE.Box3().setFromObject(collision);
+          if (!isUsableBox(sourceBounds)) continue;
+
+          const scale = getBestUniformScale(sourceBounds, targetBounds);
+          if (!Number.isFinite(scale) || scale <= 0) continue;
+
+          const scaledBounds = scaleBoxFromOrigin(sourceBounds, scale);
+          candidates.push({
+            scale,
+            axes,
+            score: getBoundsAlignmentScore(scaledBounds, targetBounds),
+            source: "splat-bounds",
+          });
+        }
+      } finally {
+        collision.scale.copy(originalScale);
+        collision.updateWorldMatrix(true, true);
+      }
+
+      return candidates.reduce(
+        (best, candidate) => (candidate.score < best.score ? candidate : best),
+        candidates[0] ?? getCollisionFallbackAlignment(),
       );
     }
 
@@ -1082,6 +1495,208 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
         mesh.userData.selection = { type: "object", id: object.id };
         root.add(mesh);
       }
+    }
+
+    function snapSceneObjectsToCollisionSurface() {
+      if (!latestRef.current.scene.assets.collision || objectDragStateRef.current) {
+        return;
+      }
+
+      for (const object of latestRef.current.scene.objects) {
+        const key = `${latestRef.current.scene.id}:${object.id}`;
+        if (collisionSnappedObjectKeysRef.current.has(key)) continue;
+
+        const nextPosition = getObjectPositionOnCollisionSurface(
+          new THREE.Vector3(...object.position),
+        );
+        if (!nextPosition) continue;
+
+        collisionSnappedObjectKeysRef.current.add(key);
+        if (Math.abs(nextPosition.y - object.position[1]) < 0.001) continue;
+
+        latestRef.current.onUpdateObject(object.id, {
+          position: vectorToTuple(nextPosition),
+        });
+      }
+    }
+
+    function getObjectPositionOnCollisionSurface(position: THREE.Vector3) {
+      const floorY = getCollisionWalkableFloorY();
+      const hit = getPlaceableCollisionHitAtXZ(position.x, position.z);
+      if (!hit) {
+        return floorY === undefined
+          ? undefined
+          : new THREE.Vector3(position.x, floorY, position.z);
+      }
+
+      return new THREE.Vector3(position.x, hit.point.y, position.z);
+    }
+
+    function getPlaceableCollisionHitAtXZ(x: number, z: number) {
+      const collision = collisionMeshRef.current;
+      const meshes = getCollisionMeshes();
+      if (!collision || meshes.length === 0) return undefined;
+
+      const bounds = new THREE.Box3().setFromObject(collision);
+      const originY = isUsableBox(bounds)
+        ? bounds.max.y + Math.max(bounds.getSize(new THREE.Vector3()).y * 0.1, 1)
+        : 20;
+      const far = isUsableBox(bounds)
+        ? Math.max(bounds.getSize(new THREE.Vector3()).y + 2, 10)
+        : 40;
+
+      raycasterRef.current.set(
+        new THREE.Vector3(x, originY, z),
+        new THREE.Vector3(0, -1, 0),
+      );
+      raycasterRef.current.far = far;
+      const hits = raycasterRef.current.intersectObjects(meshes, false);
+      const floorY = getCollisionWalkableFloorY();
+      const placeableHits = hits.filter((hit) => {
+        const normal = getHitWorldNormal(hit);
+        const isWalkable = normal ? Math.abs(normal.y) >= PLACEABLE_SURFACE_MIN_UP : true;
+        const isOnFloor =
+          floorY === undefined || Math.abs(hit.point.y - floorY) <= getCollisionFloorBandHeight();
+        return isWalkable && isOnFloor;
+      });
+      if (placeableHits.length === 0) return undefined;
+
+      if (floorY === undefined) {
+        return placeableHits.reduce((lowest, hit) =>
+          hit.point.y < lowest.point.y ? hit : lowest,
+        );
+      }
+
+      return placeableHits.reduce((closest, hit) =>
+        Math.abs(hit.point.y - floorY) < Math.abs(closest.point.y - floorY)
+          ? hit
+          : closest,
+      );
+    }
+
+    function getCollisionWalkableFloorY() {
+      const key = getCollisionWalkableFloorKey();
+      if (collisionWalkableFloorRef.current?.key === key) {
+        return collisionWalkableFloorRef.current.y;
+      }
+
+      const y = computeCollisionWalkableFloorY() ?? getSceneAuthoredFloorY();
+      collisionWalkableFloorRef.current = { key, y };
+      return y;
+    }
+
+    function getCollisionFloorBandHeight() {
+      const collision = collisionMeshRef.current;
+      if (!collision) return COLLISION_FLOOR_BAND_MIN_HEIGHT;
+
+      const bounds = new THREE.Box3().setFromObject(collision);
+      if (!isUsableBox(bounds)) return COLLISION_FLOOR_BAND_MIN_HEIGHT;
+
+      const scaledBand = bounds.getSize(new THREE.Vector3()).y * 0.01;
+      return Math.max(
+        Math.min(scaledBand, 0.22),
+        COLLISION_FLOOR_BAND_MIN_HEIGHT,
+      );
+    }
+
+    function computeCollisionWalkableFloorY() {
+      const points = getCollisionHorizontalSurfacePoints();
+      if (points.length === 0) return undefined;
+
+      const authoredFloorY = getSceneAuthoredFloorY();
+      const candidateY =
+        authoredFloorY === undefined
+          ? getLowWalkableFloorCandidateY(points)
+          : points.reduce((closest, point) =>
+              Math.abs(point.y - authoredFloorY) <
+              Math.abs(closest.y - authoredFloorY)
+                ? point
+                : closest,
+            ).y;
+      const floorBand = getCollisionFloorBandHeight();
+      const floorPoints = points.filter(
+        (point) => Math.abs(point.y - candidateY) <= floorBand,
+      );
+      if (floorPoints.length === 0) return candidateY;
+
+      return (
+        floorPoints.reduce((total, point) => total + point.y, 0) /
+        floorPoints.length
+      );
+    }
+
+    function getLowWalkableFloorCandidateY(points: THREE.Vector3[]) {
+      const sortedY = points
+        .map((point) => point.y)
+        .sort((a, b) => a - b);
+      const index = Math.min(
+        sortedY.length - 1,
+        Math.max(0, Math.floor((sortedY.length - 1) * COLLISION_FLOOR_LOW_QUANTILE)),
+      );
+      return sortedY[index];
+    }
+
+    function getCollisionHorizontalSurfacePoints() {
+      const meshes = getCollisionMeshes();
+      const points: THREE.Vector3[] = [];
+      const position = new THREE.Vector3();
+      const a = new THREE.Vector3();
+      const b = new THREE.Vector3();
+      const c = new THREE.Vector3();
+      const ab = new THREE.Vector3();
+      const ac = new THREE.Vector3();
+      const normal = new THREE.Vector3();
+
+      for (const mesh of meshes) {
+        const geometry = mesh.geometry;
+        const positionAttribute = geometry.getAttribute("position");
+        if (!positionAttribute) continue;
+
+        mesh.updateWorldMatrix(true, false);
+        const index = geometry.getIndex();
+        const triangleCount = index
+          ? Math.floor(index.count / 3)
+          : Math.floor(positionAttribute.count / 3);
+
+        for (let triangleIndex = 0; triangleIndex < triangleCount; triangleIndex += 1) {
+          const ia = index ? index.getX(triangleIndex * 3) : triangleIndex * 3;
+          const ib = index ? index.getX(triangleIndex * 3 + 1) : triangleIndex * 3 + 1;
+          const ic = index ? index.getX(triangleIndex * 3 + 2) : triangleIndex * 3 + 2;
+
+          a.fromBufferAttribute(positionAttribute, ia).applyMatrix4(mesh.matrixWorld);
+          b.fromBufferAttribute(positionAttribute, ib).applyMatrix4(mesh.matrixWorld);
+          c.fromBufferAttribute(positionAttribute, ic).applyMatrix4(mesh.matrixWorld);
+
+          ab.subVectors(b, a);
+          ac.subVectors(c, a);
+          normal.crossVectors(ab, ac);
+          if (normal.lengthSq() === 0) continue;
+          normal.normalize();
+          if (Math.abs(normal.y) < PLACEABLE_SURFACE_MIN_UP) continue;
+
+          position.copy(a).add(b).add(c).multiplyScalar(1 / 3);
+          points.push(position.clone());
+        }
+      }
+
+      return points;
+    }
+
+    function getCollisionWalkableFloorKey() {
+      return [
+        latestRef.current.scene.id,
+        latestRef.current.scene.assets.id,
+        latestRef.current.scene.assets.collision?.path,
+        latestRef.current.scene.assets.collision?.objectUrl,
+        latestRef.current.scene.assets.defaults?.viewpoint?.eye.join(","),
+      ].join(":");
+    }
+
+    function getSceneAuthoredFloorY() {
+      const viewpoint = latestRef.current.scene.assets.defaults?.viewpoint;
+      if (!latestRef.current.scene.assets.splat || !viewpoint) return undefined;
+
+      return viewpoint.eye[1] - HUMAN_EYE_HEIGHT;
     }
 
     function createObjectMesh(object: BoardObject) {
@@ -1825,8 +2440,9 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       const hitPoint = intersectDragPlane(dragState.plane);
       if (!hitPoint) return;
       const nextPoint = hitPoint.add(dragState.offset);
+      const snappedPoint = getObjectPositionOnCollisionSurface(nextPoint) ?? nextPoint;
       latestRef.current.onUpdateObject(dragState.objectId, {
-        position: vectorToTuple(nextPoint),
+        position: vectorToTuple(snappedPoint),
       });
     }
 
@@ -2214,6 +2830,20 @@ function vectorToTuple(vector: THREE.Vector3): [number, number, number] {
   ];
 }
 
+function getHorizontalSpan(size: THREE.Vector3) {
+  return Math.hypot(size.x, size.z);
+}
+
+function getAdaptiveEntityScale(horizontalSpan: number) {
+  if (!Number.isFinite(horizontalSpan) || horizontalSpan <= 0) return 1;
+
+  return clamp(
+    horizontalSpan / REFERENCE_SCENE_HORIZONTAL_SPAN,
+    MIN_ADAPTIVE_ENTITY_SCALE,
+    MAX_ADAPTIVE_ENTITY_SCALE,
+  );
+}
+
 function isUsableBox(box: THREE.Box3) {
   return (
     Number.isFinite(box.min.x) &&
@@ -2224,6 +2854,87 @@ function isUsableBox(box: THREE.Box3) {
     Number.isFinite(box.max.z) &&
     !box.isEmpty()
   );
+}
+
+function getAxisSignCandidates(): Array<[number, number, number]> {
+  return [
+    [1, 1, 1],
+    [-1, 1, 1],
+    [1, -1, 1],
+    [-1, -1, 1],
+    [1, 1, -1],
+    [-1, 1, -1],
+    [1, -1, -1],
+    [-1, -1, -1],
+  ];
+}
+
+function axesMatch(a: [number, number, number], b: [number, number, number]) {
+  return a.every((axis, index) => axis === b[index]);
+}
+
+function transformBox(box: THREE.Box3, matrix: THREE.Matrix4) {
+  const transformedBox = box.clone();
+  transformedBox.applyMatrix4(matrix);
+  return transformedBox;
+}
+
+function getBestUniformScale(sourceBounds: THREE.Box3, targetBounds: THREE.Box3) {
+  const sourceValues = [
+    sourceBounds.min.x,
+    sourceBounds.max.x,
+    sourceBounds.min.y,
+    sourceBounds.max.y,
+    sourceBounds.min.z,
+    sourceBounds.max.z,
+  ];
+  const targetValues = [
+    targetBounds.min.x,
+    targetBounds.max.x,
+    targetBounds.min.y,
+    targetBounds.max.y,
+    targetBounds.min.z,
+    targetBounds.max.z,
+  ];
+  let numerator = 0;
+  let denominator = 0;
+
+  for (let index = 0; index < sourceValues.length; index += 1) {
+    numerator += sourceValues[index] * targetValues[index];
+    denominator += sourceValues[index] * sourceValues[index];
+  }
+
+  if (denominator <= 0) return 1;
+  return Math.abs(numerator / denominator);
+}
+
+function scaleBoxFromOrigin(box: THREE.Box3, scale: number) {
+  const points = [
+    new THREE.Vector3(box.min.x, box.min.y, box.min.z),
+    new THREE.Vector3(box.min.x, box.min.y, box.max.z),
+    new THREE.Vector3(box.min.x, box.max.y, box.min.z),
+    new THREE.Vector3(box.min.x, box.max.y, box.max.z),
+    new THREE.Vector3(box.max.x, box.min.y, box.min.z),
+    new THREE.Vector3(box.max.x, box.min.y, box.max.z),
+    new THREE.Vector3(box.max.x, box.max.y, box.min.z),
+    new THREE.Vector3(box.max.x, box.max.y, box.max.z),
+  ];
+  const scaledBox = new THREE.Box3();
+
+  for (const point of points) {
+    scaledBox.expandByPoint(point.multiplyScalar(scale));
+  }
+
+  return scaledBox;
+}
+
+function getBoundsAlignmentScore(sourceBounds: THREE.Box3, targetBounds: THREE.Box3) {
+  const sourceCenter = sourceBounds.getCenter(new THREE.Vector3());
+  const targetCenter = targetBounds.getCenter(new THREE.Vector3());
+  const sourceSize = sourceBounds.getSize(new THREE.Vector3());
+  const targetSize = targetBounds.getSize(new THREE.Vector3());
+
+  return sourceCenter.distanceTo(targetCenter) + sourceSize.distanceTo(targetSize) * 0.35;
 }
 
 function keepPointInsideBox(point: THREE.Vector3, box: THREE.Box3) {
