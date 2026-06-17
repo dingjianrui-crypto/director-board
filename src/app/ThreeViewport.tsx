@@ -348,6 +348,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       };
       const onPointerDown = (event: PointerEvent) => {
         updatePointer(event);
+        clearKeyboardNavigation();
         if (startCameraHandleDrag(event)) return;
         if (startObjectHandleDrag(event)) return;
         pickSelection();
@@ -384,10 +385,18 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
         if (!isKeyboardNavKey(event.code)) return;
         keyboardNavKeysRef.current.delete(event.code);
       };
+      const onBlur = () => {
+        clearKeyboardNavigation();
+      };
+      const onVisibilityChange = () => {
+        if (document.visibilityState !== "visible") clearKeyboardNavigation();
+      };
 
       window.addEventListener("resize", onResize);
       window.addEventListener("keydown", onKeyDown);
       window.addEventListener("keyup", onKeyUp);
+      window.addEventListener("blur", onBlur);
+      document.addEventListener("visibilitychange", onVisibilityChange);
       renderer.domElement.addEventListener("pointerdown", onPointerDown);
       renderer.domElement.addEventListener("pointermove", onPointerMove);
       renderer.domElement.addEventListener("pointerup", onPointerUp);
@@ -416,6 +425,8 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
         window.removeEventListener("resize", onResize);
         window.removeEventListener("keydown", onKeyDown);
         window.removeEventListener("keyup", onKeyUp);
+        window.removeEventListener("blur", onBlur);
+        document.removeEventListener("visibilitychange", onVisibilityChange);
         renderer.domElement.removeEventListener("pointerdown", onPointerDown);
         renderer.domElement.removeEventListener("pointermove", onPointerMove);
         renderer.domElement.removeEventListener("pointerup", onPointerUp);
@@ -841,7 +852,15 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
     function updateKeyboardNavigation(deltaTime: number) {
       const camera = editorCameraRef.current;
       const controls = controlsRef.current;
-      if (!camera || !controls || keyboardNavKeysRef.current.size === 0) return;
+      if (
+        !camera ||
+        !controls ||
+        keyboardNavKeysRef.current.size === 0 ||
+        dragStateRef.current ||
+        objectDragStateRef.current
+      ) {
+        return;
+      }
 
       const viewForward = new THREE.Vector3();
       camera.getWorldDirection(viewForward);
@@ -882,6 +901,10 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       const appliedMove = resolvedPosition.clone().sub(camera.position);
       camera.position.copy(resolvedPosition);
       controls.target.add(appliedMove);
+    }
+
+    function clearKeyboardNavigation() {
+      keyboardNavKeysRef.current.clear();
     }
 
     function publishEditorViewpoint(frameTime: number) {
@@ -2463,9 +2486,15 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
     function intersectDragPlane(plane: THREE.Plane) {
       const editorCamera = editorCameraRef.current;
       if (!editorCamera) return undefined;
-      raycasterRef.current.setFromCamera(pointerRef.current, editorCamera);
+      setPointerRaycasterFromCamera(editorCamera);
       const hitPoint = new THREE.Vector3();
       return raycasterRef.current.ray.intersectPlane(plane, hitPoint) ?? undefined;
+    }
+
+    function setPointerRaycasterFromCamera(editorCamera: THREE.Camera) {
+      raycasterRef.current.near = 0;
+      raycasterRef.current.far = Infinity;
+      raycasterRef.current.setFromCamera(pointerRef.current, editorCamera);
     }
 
     function updateHoveredCameraHandle() {
@@ -2562,7 +2591,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       if (!editorCamera || !cameraRoot) return null;
 
       updateCameraHandleFacing();
-      raycasterRef.current.setFromCamera(pointerRef.current, editorCamera);
+      setPointerRaycasterFromCamera(editorCamera);
       const axisPlaneHitAreas: THREE.Object3D[] = [];
       cameraRoot.traverse((child) => {
         if (child.name === "CameraAxisPlaneHitArea") {
@@ -2590,7 +2619,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       const objectRoot = objectRootRef.current;
       if (!editorCamera || !objectRoot) return null;
 
-      raycasterRef.current.setFromCamera(pointerRef.current, editorCamera);
+      setPointerRaycasterFromCamera(editorCamera);
       const hitAreas: THREE.Object3D[] = [];
       objectRoot.traverse((child) => {
         if (child.name === "ObjectFloorPlaneHitArea") {
@@ -2689,7 +2718,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       const editorCamera = editorCameraRef.current;
       if (!threeScene || !editorCamera) return false;
 
-      raycasterRef.current.setFromCamera(pointerRef.current, editorCamera);
+      setPointerRaycasterFromCamera(editorCamera);
       const objectHits = raycasterRef.current.intersectObjects(
         objectRootRef.current?.children ?? [],
         true,

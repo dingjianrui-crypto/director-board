@@ -478,6 +478,7 @@ h3 {
 }
 
 .camera-preview {
+  pointer-events: none;
   position: absolute;
   right: 16px;
   bottom: 16px;
@@ -519,6 +520,7 @@ h3 {
 }
 
 .camera-preview button {
+  pointer-events: auto;
   display: flex;
   align-items: center;
   justify-content: center;
