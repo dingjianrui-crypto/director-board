@@ -56,7 +56,12 @@ export type ThreeViewportHandle = {
       width?: number;
       height?: number;
     },
-  ) => string | undefined;
+  ) => Promise<string | undefined>;
+  captureViewpoint: (options?: {
+    width?: number;
+    height?: number;
+  }) => Promise<string | undefined>;
+  getViewpoint: () => EditorViewpoint | undefined;
 };
 
 export type CollisionAlignmentReadout = {
@@ -272,6 +277,12 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
     useImperativeHandle(ref, () => ({
       capture(cameraId: string, options?: { width?: number; height?: number }) {
         return captureCamera(cameraId, options);
+      },
+      captureViewpoint(options?: { width?: number; height?: number }) {
+        return captureEditorViewpoint(options);
+      },
+      getViewpoint() {
+        return getEditorViewpoint();
       },
     }));
 
@@ -918,14 +929,9 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
     }
 
     function publishEditorViewpoint(frameTime: number) {
-      const camera = editorCameraRef.current;
-      const controls = controlsRef.current;
-      if (!camera || !controls) return;
+      const viewpoint = getEditorViewpoint();
+      if (!viewpoint) return;
 
-      const viewpoint: EditorViewpoint = {
-        eye: viewpointVectorToTuple(camera.position),
-        target: viewpointVectorToTuple(controls.target),
-      };
       const key = `${latestRef.current.scene.id}:${JSON.stringify(viewpoint)}`;
       const last = lastViewpointPublishRef.current;
       if (last?.key === key) return;
@@ -933,6 +939,17 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
 
       lastViewpointPublishRef.current = { time: frameTime, key };
       latestRef.current.onViewpointChange(viewpoint);
+    }
+
+    function getEditorViewpoint(): EditorViewpoint | undefined {
+      const camera = editorCameraRef.current;
+      const controls = controlsRef.current;
+      if (!camera || !controls) return undefined;
+
+      return {
+        eye: viewpointVectorToTuple(camera.position),
+        target: viewpointVectorToTuple(controls.target),
+      };
     }
 
     function getKeyboardNavResolvedPosition(
@@ -2809,61 +2826,251 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       return undefined;
     }
 
-    function captureCamera(
+    async function captureCamera(
       cameraId: string,
       options: { width?: number; height?: number } = {},
     ) {
-      const renderer = rendererRef.current;
-      const threeScene = sceneRef.current;
-      if (!renderer || !threeScene) return undefined;
-
       const directorCamera = latestRef.current.scene.cameras.find(
         (camera) => camera.id === cameraId,
       );
       if (!directorCamera) return undefined;
 
-      const oldSize = new THREE.Vector2();
-      renderer.getSize(oldSize);
-      const oldPixelRatio = renderer.getPixelRatio();
       const width = options.width ?? DEFAULT_CAPTURE_SIZE.width;
       const height = options.height ?? DEFAULT_CAPTURE_SIZE.height;
       const camera = createPerspectiveFromDirectorCamera(directorCamera, width / height);
+      return captureWithPerspectiveCamera(camera, width, height);
+    }
+
+    async function captureEditorViewpoint(
+      options: { width?: number; height?: number } = {},
+    ) {
+      const width = options.width ?? DEFAULT_CAPTURE_SIZE.width;
+      const height = options.height ?? DEFAULT_CAPTURE_SIZE.height;
+      const camera = createPerspectiveFromEditorCamera(width / height);
+      if (!camera) return undefined;
+
+      return captureWithPerspectiveCamera(camera, width, height);
+    }
+
+    async function captureWithPerspectiveCamera(
+      camera: THREE.PerspectiveCamera,
+      width: number,
+      height: number,
+    ) {
+      const renderer = rendererRef.current;
+      const threeScene = sceneRef.current;
+      if (!renderer || !threeScene) return undefined;
 
       const collisionVisible = collisionMeshRef.current?.visible ?? false;
       const cameraRootVisible = cameraRootRef.current?.visible ?? false;
       const labelRootVisible = labelRootRef.current?.visible ?? false;
       const gridVisible = gridRef.current?.visible ?? false;
-      if (collisionMeshRef.current) {
-        collisionMeshRef.current.visible = false;
+
+      try {
+        if (collisionMeshRef.current) {
+          collisionMeshRef.current.visible = false;
+        }
+        if (cameraRootRef.current) {
+          cameraRootRef.current.visible = false;
+        }
+        if (labelRootRef.current) {
+          labelRootRef.current.visible = false;
+        }
+        if (gridRef.current) {
+          gridRef.current.visible = false;
+        }
+
+        await sparkRef.current?.update?.({ scene: threeScene, camera });
+        if (splatMeshRef.current) {
+          return captureWithVisibleFramebuffer(renderer, threeScene, camera, width, height);
+        }
+
+        return captureWithRenderTarget(renderer, threeScene, camera, width, height);
+      } finally {
+        if (collisionMeshRef.current) {
+          collisionMeshRef.current.visible = collisionVisible;
+        }
+        if (cameraRootRef.current) {
+          cameraRootRef.current.visible = cameraRootVisible;
+        }
+        if (labelRootRef.current) {
+          labelRootRef.current.visible = labelRootVisible;
+        }
+        if (gridRef.current) {
+          gridRef.current.visible = gridVisible;
+        }
+        await redrawEditorView(renderer, threeScene);
       }
-      if (cameraRootRef.current) {
-        cameraRootRef.current.visible = false;
+    }
+
+    function captureWithRenderTarget(
+      renderer: THREE.WebGLRenderer,
+      threeScene: THREE.Scene,
+      camera: THREE.PerspectiveCamera,
+      width: number,
+      height: number,
+    ) {
+      const oldRenderTarget = renderer.getRenderTarget();
+      const oldViewport = new THREE.Vector4();
+      const oldScissor = new THREE.Vector4();
+      renderer.getViewport(oldViewport);
+      renderer.getScissor(oldScissor);
+      const oldScissorTest = renderer.getScissorTest();
+      const renderTarget = new THREE.WebGLRenderTarget(width, height, {
+        depthBuffer: true,
+        stencilBuffer: false,
+      });
+      renderTarget.texture.colorSpace = renderer.outputColorSpace;
+
+      try {
+        renderer.setRenderTarget(renderTarget);
+        renderer.setViewport(0, 0, width, height);
+        renderer.setScissor(0, 0, width, height);
+        renderer.setScissorTest(false);
+        renderer.clear(true, true, true);
+        renderer.render(threeScene, camera);
+        return renderTargetToDataUrl(renderer, renderTarget, width, height);
+      } finally {
+        renderer.setRenderTarget(oldRenderTarget);
+        renderer.setViewport(oldViewport);
+        renderer.setScissor(oldScissor);
+        renderer.setScissorTest(oldScissorTest);
+        renderTarget.dispose();
       }
-      if (labelRootRef.current) {
-        labelRootRef.current.visible = false;
+    }
+
+    function captureWithVisibleFramebuffer(
+      renderer: THREE.WebGLRenderer,
+      threeScene: THREE.Scene,
+      camera: THREE.PerspectiveCamera,
+      width: number,
+      height: number,
+    ) {
+      const oldRenderTarget = renderer.getRenderTarget();
+      const oldViewport = new THREE.Vector4();
+      const oldScissor = new THREE.Vector4();
+      renderer.getViewport(oldViewport);
+      renderer.getScissor(oldScissor);
+      const oldScissorTest = renderer.getScissorTest();
+      const bufferSize = new THREE.Vector2();
+      renderer.getDrawingBufferSize(bufferSize);
+      const targetAspect = width / height;
+      const viewport = fitViewportToAspect(bufferSize.x, bufferSize.y, targetAspect);
+
+      try {
+        renderer.setRenderTarget(null);
+        renderer.setViewport(0, 0, viewport.width, viewport.height);
+        renderer.setScissor(0, 0, viewport.width, viewport.height);
+        renderer.setScissorTest(false);
+        renderer.clear(true, true, true);
+        renderer.render(threeScene, camera);
+        return canvasRegionToDataUrl(
+          renderer.domElement,
+          0,
+          0,
+          viewport.width,
+          viewport.height,
+          width,
+          height,
+        );
+      } finally {
+        renderer.setRenderTarget(oldRenderTarget);
+        renderer.setViewport(oldViewport);
+        renderer.setScissor(oldScissor);
+        renderer.setScissorTest(oldScissorTest);
       }
-      if (gridRef.current) {
-        gridRef.current.visible = false;
+    }
+
+    async function redrawEditorView(
+      renderer: THREE.WebGLRenderer,
+      threeScene: THREE.Scene,
+    ) {
+      const editorCamera = editorCameraRef.current;
+      if (!editorCamera) return;
+
+      const bufferSize = new THREE.Vector2();
+      renderer.getDrawingBufferSize(bufferSize);
+      await sparkRef.current?.update?.({ scene: threeScene, camera: editorCamera });
+      renderer.setRenderTarget(null);
+      renderer.setViewport(0, 0, bufferSize.x, bufferSize.y);
+      renderer.setScissor(0, 0, bufferSize.x, bufferSize.y);
+      renderer.setScissorTest(false);
+      renderer.render(threeScene, editorCamera);
+    }
+
+    function fitViewportToAspect(
+      bufferWidth: number,
+      bufferHeight: number,
+      targetAspect: number,
+    ) {
+      let width = bufferWidth;
+      let height = Math.round(width / targetAspect);
+      if (height > bufferHeight) {
+        height = bufferHeight;
+        width = Math.round(height * targetAspect);
       }
-      renderer.setPixelRatio(1);
-      renderer.setSize(width, height, false);
-      renderer.render(threeScene, camera);
-      const dataUrl = renderer.domElement.toDataURL("image/png");
-      renderer.setPixelRatio(oldPixelRatio);
-      renderer.setSize(oldSize.x, oldSize.y, false);
-      if (collisionMeshRef.current) {
-        collisionMeshRef.current.visible = collisionVisible;
+      return {
+        width: Math.max(1, Math.floor(width)),
+        height: Math.max(1, Math.floor(height)),
+      };
+    }
+
+    function canvasRegionToDataUrl(
+      sourceCanvas: HTMLCanvasElement,
+      sourceX: number,
+      sourceY: number,
+      sourceWidth: number,
+      sourceHeight: number,
+      outputWidth: number,
+      outputHeight: number,
+    ) {
+      const canvas = document.createElement("canvas");
+      canvas.width = outputWidth;
+      canvas.height = outputHeight;
+      const context = canvas.getContext("2d");
+      if (!context) return undefined;
+
+      context.drawImage(
+        sourceCanvas,
+        sourceX,
+        sourceCanvas.height - sourceY - sourceHeight,
+        sourceWidth,
+        sourceHeight,
+        0,
+        0,
+        outputWidth,
+        outputHeight,
+      );
+      return canvas.toDataURL("image/png");
+    }
+
+    function renderTargetToDataUrl(
+      renderer: THREE.WebGLRenderer,
+      renderTarget: THREE.WebGLRenderTarget,
+      width: number,
+      height: number,
+    ) {
+      const pixels = new Uint8Array(width * height * 4);
+      renderer.readRenderTargetPixels(renderTarget, 0, 0, width, height, pixels);
+
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext("2d");
+      if (!context) return undefined;
+
+      const imageData = context.createImageData(width, height);
+      const rowWidth = width * 4;
+      for (let y = 0; y < height; y += 1) {
+        const sourceStart = (height - y - 1) * rowWidth;
+        const targetStart = y * rowWidth;
+        imageData.data.set(
+          pixels.subarray(sourceStart, sourceStart + rowWidth),
+          targetStart,
+        );
       }
-      if (cameraRootRef.current) {
-        cameraRootRef.current.visible = cameraRootVisible;
-      }
-      if (labelRootRef.current) {
-        labelRootRef.current.visible = labelRootVisible;
-      }
-      if (gridRef.current) {
-        gridRef.current.visible = gridVisible;
-      }
-      return dataUrl;
+      context.putImageData(imageData, 0, 0);
+      return canvas.toDataURL("image/png");
     }
 
     function createPerspectiveFromDirectorCamera(
@@ -2875,6 +3082,26 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       camera.position.set(...directorCamera.position);
       camera.lookAt(new THREE.Vector3(...directorCamera.lookAt));
       camera.rotateZ(THREE.MathUtils.degToRad(directorCamera.roll));
+      camera.updateProjectionMatrix();
+      return camera;
+    }
+
+    function createPerspectiveFromEditorCamera(aspect: number) {
+      const editorCamera = editorCameraRef.current;
+      if (!editorCamera) return undefined;
+
+      const camera = new THREE.PerspectiveCamera(
+        editorCamera.fov,
+        aspect,
+        editorCamera.near,
+        editorCamera.far,
+      );
+      camera.position.copy(editorCamera.position);
+      camera.quaternion.copy(editorCamera.quaternion);
+      camera.zoom = editorCamera.zoom;
+      camera.focus = editorCamera.focus;
+      camera.filmGauge = editorCamera.filmGauge;
+      camera.filmOffset = editorCamera.filmOffset;
       camera.updateProjectionMatrix();
       return camera;
     }

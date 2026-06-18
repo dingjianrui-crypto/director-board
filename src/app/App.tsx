@@ -151,7 +151,7 @@ export function App() {
   const selectedCamera =
     selection.type === "camera"
       ? activeScene.cameras.find((camera) => camera.id === selection.id)
-      : activeScene.cameras[0];
+      : undefined;
   const selectedObject =
     selection.type === "object"
       ? activeScene.objects.find((object) => object.id === selection.id)
@@ -174,39 +174,43 @@ export function App() {
   );
 
   useEffect(() => {
-    const camera = selectedCamera ?? activeScene.cameras[0];
-    if (!camera) {
-      setPreviewImage(undefined);
-      return;
-    }
-
     let cancelled = false;
     let retryTimeout = 0;
+    let startTimeout = 0;
     let frameId = 0;
 
     const refreshPreview = (attempt = 0) => {
       frameId = window.requestAnimationFrame(() => {
         if (cancelled) return;
-        const image = viewportRef.current?.capture(camera.id, {
-          width: 400,
-          height: 300,
-        });
-        if (image || attempt >= 8) {
-          setPreviewImage(image);
-          return;
-        }
-        retryTimeout = window.setTimeout(() => refreshPreview(attempt + 1), 80);
+        void (async () => {
+          const image = selectedCamera
+            ? await viewportRef.current?.capture(selectedCamera.id, {
+                width: 400,
+                height: 300,
+              })
+            : await viewportRef.current?.captureViewpoint({
+                width: 400,
+                height: 300,
+              });
+          if (cancelled) return;
+          if (image || attempt >= 8) {
+            setPreviewImage(image);
+            return;
+          }
+          retryTimeout = window.setTimeout(() => refreshPreview(attempt + 1), 80);
+        })();
       });
     };
 
-    refreshPreview();
+    startTimeout = window.setTimeout(() => refreshPreview(), 120);
 
     return () => {
       cancelled = true;
       window.cancelAnimationFrame(frameId);
+      window.clearTimeout(startTimeout);
       window.clearTimeout(retryTimeout);
     };
-  }, [activeScene, selectedCamera]);
+  }, [activeScene, currentEditorViewpoint, selectedCamera]);
 
   function updateScene(updater: (scene: DirectorScene) => DirectorScene) {
     setScenes((current) =>
@@ -514,27 +518,37 @@ export function App() {
     }
   }
 
-  function captureShot() {
-    const camera = selectedCamera ?? activeScene.cameras[0];
-    if (!camera) {
-      setStatus("Add a camera before capturing a shot.");
+  async function captureShot() {
+    const viewpoint = viewportRef.current?.getViewpoint() ?? currentEditorViewpoint;
+    if (!selectedCamera && !viewpoint) {
+      setStatus("Move the viewpoint before capturing a shot.");
       return;
     }
 
-    const thumbnail = viewportRef.current?.capture(camera.id, SHOT_CAPTURE_SIZE);
+    const thumbnail = selectedCamera
+      ? await viewportRef.current?.capture(selectedCamera.id, SHOT_CAPTURE_SIZE)
+      : await viewportRef.current?.captureViewpoint(SHOT_CAPTURE_SIZE);
     const shot: Shot = {
       id: `shot-${Date.now().toString(36)}`,
       name: `Shot ${activeScene.shots.length + 1}`,
-      cameraId: camera.id,
-      lens: camera.lens,
-      frame: camera.frame,
+      cameraId: selectedCamera?.id,
+      viewpoint: selectedCamera ? undefined : viewpoint,
+      lens: selectedCamera?.lens ?? 35,
+      frame: selectedCamera?.frame ?? "MS",
       duration: "4s",
       thumbnail,
     };
 
-    updateScene((scene) => ({ ...scene, shots: [...scene.shots, shot] }));
+    updateScene((scene) => ({
+      ...scene,
+      shots: [...scene.shots, shot],
+    }));
     setSelection({ type: "shot", id: shot.id });
-    setStatus(`Captured ${shot.name}`);
+    setStatus(
+      selectedCamera
+        ? `Captured ${shot.name}`
+        : `Captured ${shot.name} from current viewpoint`,
+    );
   }
 
   function downloadShot(shot: Shot) {
@@ -770,6 +784,7 @@ export function App() {
           </div>
           <CameraPreview
             camera={selectedCamera}
+            isViewpointPreview={!selectedCamera}
             previewImage={previewImage}
             onCapture={captureShot}
           />
@@ -902,7 +917,15 @@ function cloneScene(scene: DirectorScene): DirectorScene {
       position: [...camera.position],
       lookAt: [...camera.lookAt],
     })),
-    shots: scene.shots.map((shot) => ({ ...shot })),
+    shots: scene.shots.map((shot) => ({
+      ...shot,
+      viewpoint: shot.viewpoint
+        ? {
+            eye: [...shot.viewpoint.eye],
+            target: [...shot.viewpoint.target],
+          }
+        : undefined,
+    })),
   };
 }
 
@@ -1262,12 +1285,14 @@ function SceneInspector({
 }
 
 function ShotInspector({ shot, camera }: { shot: Shot; camera?: DirectorCamera }) {
+  const sourceLabel = camera?.name ?? (shot.viewpoint ? "current viewpoint" : "missing camera");
+
   return (
     <div className="inspector">
       <div className="readonly-block">
         <span>{shot.name}</span>
         <strong>{shot.frame} · {shot.lens}mm</strong>
-        <small>{camera?.name ?? "missing camera"} · {shot.duration}</small>
+        <small>{sourceLabel} · {shot.duration}</small>
       </div>
       {shot.thumbnail && <img className="shot-inspector-image" src={shot.thumbnail} alt="" />}
     </div>
@@ -1319,18 +1344,24 @@ function ViewpointValue({
 
 function CameraPreview({
   camera,
+  isViewpointPreview,
   previewImage,
   onCapture,
 }: {
   camera?: DirectorCamera;
+  isViewpointPreview: boolean;
   previewImage?: string;
   onCapture: () => void;
 }) {
+  const title = camera?.name ?? (isViewpointPreview ? "Current viewpoint" : "No camera");
+  const detail = camera ? `${camera.lens}mm` : "view";
+  const placeholder = camera?.frame ?? (isViewpointPreview ? "Live view" : "Frame");
+
   return (
     <div className="camera-preview">
       <div className="camera-preview-head">
-        <span>{camera?.name ?? "No camera"}</span>
-        <small>{camera?.lens ?? "--"}mm</small>
+        <span>{title}</span>
+        <small>{detail}</small>
       </div>
       <div className="preview-window">
         {previewImage ? (
@@ -1338,7 +1369,7 @@ function CameraPreview({
         ) : (
           <>
             <Video size={28} />
-            <span>{camera?.frame ?? "Frame"}</span>
+            <span>{placeholder}</span>
           </>
         )}
       </div>

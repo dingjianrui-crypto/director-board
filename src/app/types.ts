@@ -86,7 +86,8 @@ export type DirectorCamera = {
 export type Shot = {
   id: string;
   name: string;
-  cameraId: string;
+  cameraId?: string;
+  viewpoint?: EditorViewpoint;
   lens: number;
   frame: string;
   duration: string;
