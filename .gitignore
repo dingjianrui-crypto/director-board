@@ -29,3 +29,9 @@ Thumbs.db
 *.swp
 *.swo
 
+#3D objects
+*.obj
+*.fbx
+*.glb
+*.spz
+

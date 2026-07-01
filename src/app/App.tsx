@@ -62,7 +62,16 @@ import {
 const frameOptions = ["EWS", "WS", "FS", "MS", "MCU", "CU", "ECU", "OTS"];
 const lensOptions = [14, 18, 24, 28, 35, 50, 65, 85, 100, 135];
 const BUILT_IN_SCENE_MANIFEST_PATH = "/assets/environments/manifest.json";
+const BUILT_IN_OBJECT_CONFIG_PATH = "/assets/config.json";
 const SHOT_CAPTURE_SIZE = { width: 1440, height: 1080 };
+
+type BuiltInObjectItem = {
+  type: BoardObjectKind;
+  id: string;
+  name: string;
+  file: string;
+  fileType: string;
+};
 
 const orientationPresets = [
   { label: "Spark", rotation: [0, 0, 0] },
@@ -96,6 +105,7 @@ export function App() {
   const [sceneSizings, setSceneSizings] = useState<
     Record<string, SceneSizingReadout | undefined>
   >({});
+  const [builtInObjects, setBuiltInObjects] = useState<BuiltInObjectItem[]>([]);
   const [status, setStatus] = useState("Ready");
 
   useEffect(() => {
@@ -139,6 +149,35 @@ export function App() {
     }
 
     void loadSceneLibrary();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadBuiltInObjectLibrary() {
+      try {
+        const response = await fetch(BUILT_IN_OBJECT_CONFIG_PATH);
+        if (!response.ok) {
+          throw new Error(`Config request failed with ${response.status}`);
+        }
+
+        const items = parseBuiltInObjectConfig(await response.json());
+        if (!cancelled) {
+          setBuiltInObjects(items);
+          if (items.length > 0) {
+            setStatus(`Loaded ${items.length} built-in object${items.length === 1 ? "" : "s"}`);
+          }
+        }
+      } catch {
+        if (!cancelled) setStatus("Could not load built-in object config.");
+      }
+    }
+
+    void loadBuiltInObjectLibrary();
 
     return () => {
       cancelled = true;
@@ -327,13 +366,21 @@ export function App() {
     }
   }
 
-  function addObject(kind: BoardObjectKind, model: string) {
+  function addObject(
+    kind: BoardObjectKind,
+    model: string,
+    options: { name?: string; modelFile?: string; modelFileType?: string } = {},
+  ) {
     const index = activeScene.objects.length + 1;
     const object: BoardObject = {
       id: `obj-${Date.now().toString(36)}`,
-      name: kind === "character" ? `Actor ${index}` : modelName(model, index),
+      name:
+        options.name ??
+        (kind === "character" ? `Actor ${index}` : modelName(model, index)),
       kind,
       model,
+      modelFile: options.modelFile,
+      modelFileType: options.modelFileType,
       color: kind === "character" ? "#7fc8a9" : "#b78b60",
       position: [0.4 + index * 0.18, 0, 0.6],
       rotationY: 0,
@@ -358,6 +405,14 @@ export function App() {
 
     updateScene((scene) => ({ ...scene, cameras: [...scene.cameras, camera] }));
     setSelection({ type: "camera", id: camera.id });
+  }
+
+  function addBuiltInObject(item: BuiltInObjectItem) {
+    addObject(item.type, item.id, {
+      name: item.name,
+      modelFile: item.file,
+      modelFileType: item.fileType,
+    });
   }
 
   function updateCamera(cameraId: string, patch: Partial<DirectorCamera>) {
@@ -628,6 +683,16 @@ export function App() {
               <button onClick={addCamera}><Camera size={15} /> Camera</button>
             </div>
             <div className="prop-grid">
+              {builtInObjects.map((item) => (
+                <button
+                  key={item.id}
+                  title={item.name}
+                  onClick={() => addBuiltInObject(item)}
+                >
+                  {item.type === "character" ? <UserRound size={13} /> : <Box size={13} />}
+                  {item.name}
+                </button>
+              ))}
               {["cube", "table", "chair", "sofa", "counter", "lamp", "light", "door"].map((prop) => (
                 <button key={prop} onClick={() => addObject("prop", prop)}>
                   <Box size={13} />
@@ -721,6 +786,7 @@ export function App() {
             selection={selection}
             showGrid={showGrid}
             showLabels={showLabels}
+            viewMode={viewMode}
             onSelect={setSelection}
             onUpdateCamera={updateCamera}
             onUpdateObject={updateObject}
@@ -1602,4 +1668,46 @@ function clampNumber(value: number, min: number, max: number) {
 
 function modelName(model: string, index: number) {
   return `${model.charAt(0).toUpperCase()}${model.slice(1)} ${index}`;
+}
+
+function parseBuiltInObjectConfig(config: unknown): BuiltInObjectItem[] {
+  if (!Array.isArray(config)) return [];
+
+  const ids = new Set<string>();
+  const items: BuiltInObjectItem[] = [];
+
+  for (const entry of config) {
+    if (!entry || typeof entry !== "object") continue;
+    const candidate = entry as Partial<Record<"type" | "id" | "name" | "file", unknown>>;
+    if (candidate.type !== "character" && candidate.type !== "prop") continue;
+    if (
+      typeof candidate.id !== "string" ||
+      typeof candidate.name !== "string" ||
+      typeof candidate.file !== "string"
+    ) {
+      continue;
+    }
+
+    const id = candidate.id.trim();
+    const name = candidate.name.trim();
+    const file = candidate.file.trim();
+    if (!id || !name || !file || ids.has(id)) continue;
+
+    ids.add(id);
+    items.push({
+      type: candidate.type,
+      id,
+      name,
+      file,
+      fileType: getFileExtension(file),
+    });
+  }
+
+  return items;
+}
+
+function getFileExtension(fileName: string) {
+  const lastDot = fileName.lastIndexOf(".");
+  if (lastDot < 0 || lastDot === fileName.length - 1) return "";
+  return fileName.slice(lastDot + 1).toLowerCase();
 }

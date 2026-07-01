@@ -1,0 +1,8 @@
+[
+    {
+        "type": "character",
+        "id": "warrior_1",
+        "name": "warrior",
+        "file": "/assets/characters/warrior.fbx"
+    }
+]

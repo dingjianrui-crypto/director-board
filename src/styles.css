@@ -252,8 +252,14 @@ h3 {
 .prop-grid button {
   flex-direction: column;
   gap: 2px;
+  height: 43px;
   min-height: 43px;
+  min-width: 0;
+  overflow: hidden;
   font-size: 11px;
+  line-height: 1.1;
+  text-align: center;
+  word-break: break-word;
 }
 
 .scene-row {

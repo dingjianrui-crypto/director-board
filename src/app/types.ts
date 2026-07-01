@@ -67,6 +67,8 @@ export type BoardObject = {
   name: string;
   kind: BoardObjectKind;
   model: string;
+  modelFile?: string;
+  modelFileType?: string;
   color: string;
   position: Vector3Tuple;
   rotationY: number;

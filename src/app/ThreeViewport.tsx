@@ -6,13 +6,17 @@ import {
 } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { FBXLoader } from "three/examples/jsm/loaders/FBXLoader.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { clone as cloneSkeleton } from "three/examples/jsm/utils/SkeletonUtils.js";
 import type {
   BoardObject,
+  BoardObjectKind,
   DirectorCamera,
   DirectorScene,
   EditorViewpoint,
   Selection,
+  ViewMode,
 } from "./types";
 
 type SparkModule = {
@@ -91,6 +95,7 @@ type Props = {
   selectedCameraId?: string;
   showGrid: boolean;
   showLabels: boolean;
+  viewMode: ViewMode;
   onSelect: (selection: Selection) => void;
   onUpdateCamera: (cameraId: string, patch: Partial<DirectorCamera>) => void;
   onUpdateObject: (objectId: string, patch: Partial<BoardObject>) => void;
@@ -126,7 +131,7 @@ type CameraDragState = CameraHandle & {
   updateKey: "position" | "lookAt";
 };
 
-type ObjectHandleKind = "floorPlane";
+type ObjectHandleKind = "floorPlane" | "rotateY";
 
 type ObjectHandle = {
   objectId: string;
@@ -137,6 +142,8 @@ type ObjectDragState = ObjectHandle & {
   pointerId: number;
   plane: THREE.Plane;
   offset: THREE.Vector3;
+  startAngle?: number;
+  startRotationY?: number;
 };
 
 type SceneFrameSource = "splat" | "collision" | "spawn" | "manifest";
@@ -173,6 +180,7 @@ const COLLISION_FLOOR_LOW_QUANTILE = 0.05;
 const REFERENCE_SCENE_HORIZONTAL_SPAN = 52;
 const MIN_ADAPTIVE_ENTITY_SCALE = 0.55;
 const MAX_ADAPTIVE_ENTITY_SCALE = 3;
+const SUPPORTED_OBJECT_MODEL_TYPES = new Set(["fbx", "glb", "gltf"]);
 
 export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
   function ThreeViewport(
@@ -182,6 +190,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       selectedCameraId,
       showGrid,
       showLabels,
+      viewMode,
       onSelect,
       onUpdateCamera,
       onUpdateObject,
@@ -241,6 +250,8 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       key: string;
       priority: number;
     } | null>(null);
+    const objectModelCacheRef = useRef(new Map<string, Promise<THREE.Object3D>>());
+    const failedObjectModelPathsRef = useRef(new Set<string>());
 
     const latestRef = useRef({
       scene,
@@ -248,6 +259,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       selectedCameraId,
       showGrid,
       showLabels,
+      viewMode,
       onSelect,
       onUpdateCamera,
       onUpdateObject,
@@ -264,6 +276,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       selectedCameraId,
       showGrid,
       showLabels,
+      viewMode,
       onSelect,
       onUpdateCamera,
       onUpdateObject,
@@ -479,7 +492,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       rebuildObjects();
       rebuildCameras();
       rebuildLabels();
-    }, [scene.objects, scene.cameras, selection, showLabels]);
+    }, [scene.objects, scene.cameras, selection, showLabels, viewMode]);
 
     async function rebuildSceneWorld() {
       const root = sceneWorldRootRef.current;
@@ -560,7 +573,9 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
         sparkRef.current = spark;
         return true;
       } catch (error) {
-        latestRef.current.onStatus("Spark could not be initialized; showing collision/blockout fallback.");
+        console.warn("Spark initialization failed", error);
+        const message = error instanceof Error ? error.message : String(error);
+        latestRef.current.onStatus(`Spark could not be initialized: ${message}`);
         return false;
       }
     }
@@ -1759,10 +1774,17 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       const selected =
         latestRef.current.selection.type === "object" &&
         latestRef.current.selection.id === object.id;
+      const fallback = new THREE.Group();
+      fallback.name = "ObjectFallback";
       if (object.kind === "character") {
-        buildCharacter(group, object, selected);
+        buildCharacter(fallback, object, selected);
       } else {
-        buildProp(group, object, selected);
+        buildProp(fallback, object, selected);
+      }
+      group.add(fallback);
+
+      if (object.modelFile) {
+        void loadObjectModelIntoGroup(group, fallback, object);
       }
 
       if (selected) {
@@ -1770,13 +1792,144 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
           new THREE.TorusGeometry(0.42, 0.015, 8, 36),
           new THREE.MeshBasicMaterial({ color: 0x4a9eff }),
         );
+        ring.name = "ObjectRotationRing";
         ring.rotation.x = Math.PI / 2;
         ring.position.y = 0.035;
+        ring.userData.objectHandle = { objectId: object.id, kind: "rotateY" };
+        ring.userData.baseColor = 0x4a9eff;
+        ring.userData.hoverColor = 0xffffff;
+        ring.userData.baseScale = 1;
+        ring.userData.hoverScale = 1.08;
         group.add(ring);
-        group.add(createObjectFloorMoveGizmo(object.id));
+        group.add(createObjectRotationHitArea(object.id));
+        if (latestRef.current.viewMode === "move") {
+          group.add(createObjectFloorMoveGizmo(object.id));
+        }
       }
 
       return group;
+    }
+
+    function createObjectRotationHitArea(objectId: string) {
+      const hitArea = new THREE.Mesh(
+        new THREE.RingGeometry(0.28, 0.76, 64),
+        new THREE.MeshBasicMaterial({
+          color: 0xffffff,
+          transparent: true,
+          opacity: 0,
+          depthTest: false,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        }),
+      );
+      hitArea.name = "ObjectRotationHitArea";
+      hitArea.rotation.x = Math.PI / 2;
+      hitArea.position.y = 0.055;
+      hitArea.userData.objectHandle = { objectId, kind: "rotateY" };
+      return hitArea;
+    }
+
+    async function loadObjectModelIntoGroup(
+      group: THREE.Group,
+      fallback: THREE.Group,
+      object: BoardObject,
+    ) {
+      try {
+        const model = await loadObjectModel(object);
+        if (!group.parent) return;
+
+        group.remove(fallback);
+        disposeObjectTree(fallback);
+        group.add(model);
+      } catch {
+        if (
+          object.modelFile &&
+          !failedObjectModelPathsRef.current.has(object.modelFile)
+        ) {
+          failedObjectModelPathsRef.current.add(object.modelFile);
+          latestRef.current.onStatus(`Could not load ${object.name} model; showing blockout fallback.`);
+        }
+      }
+    }
+
+    async function loadObjectModel(object: BoardObject) {
+      if (!object.modelFile) {
+        throw new Error("Object does not have a model file.");
+      }
+
+      const fileType = object.modelFileType || getFileExtension(object.modelFile);
+      if (!SUPPORTED_OBJECT_MODEL_TYPES.has(fileType)) {
+        throw new Error(`Unsupported object model type: ${fileType || "unknown"}`);
+      }
+
+      let sourcePromise = objectModelCacheRef.current.get(object.modelFile);
+      if (!sourcePromise) {
+        sourcePromise = loadObjectModelSource(object.modelFile, fileType);
+        objectModelCacheRef.current.set(object.modelFile, sourcePromise);
+      }
+
+      const source = await sourcePromise;
+      const model = cloneSkeleton(source) as THREE.Object3D;
+      cloneRenderableResources(model);
+      prepareObjectModel(model, object.kind);
+      return model;
+    }
+
+    async function loadObjectModelSource(path: string, fileType: string) {
+      if (fileType === "fbx") {
+        const loader = new FBXLoader();
+        return loader.loadAsync(path);
+      }
+
+      const loader = new GLTFLoader();
+      const gltf = await loader.loadAsync(path);
+      return gltf.scene;
+    }
+
+    function prepareObjectModel(model: THREE.Object3D, kind: BoardObjectKind) {
+      model.name = "ObjectModel";
+      model.traverse((node) => {
+        const mesh = node as THREE.Mesh;
+        if (!mesh.isMesh) return;
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        mesh.userData.selection = undefined;
+      });
+
+      model.updateWorldMatrix(true, true);
+      const bounds = new THREE.Box3().setFromObject(model);
+      const size = bounds.getSize(new THREE.Vector3());
+      if (bounds.isEmpty() || size.lengthSq() === 0) return;
+
+      const targetSize = kind === "character" ? 1.65 : 1.05;
+      const sourceSize =
+        kind === "character" ? size.y : Math.max(size.x, size.y, size.z);
+      if (sourceSize > 0) {
+        model.scale.multiplyScalar(targetSize / sourceSize);
+      }
+
+      model.updateWorldMatrix(true, true);
+      const normalizedBounds = new THREE.Box3().setFromObject(model);
+      const center = normalizedBounds.getCenter(new THREE.Vector3());
+      model.position.x -= center.x;
+      model.position.y -= normalizedBounds.min.y;
+      model.position.z -= center.z;
+    }
+
+    function cloneRenderableResources(root: THREE.Object3D) {
+      root.traverse((node) => {
+        const mesh = node as THREE.Mesh;
+        if (!mesh.isMesh) return;
+        if (mesh.geometry) {
+          mesh.geometry = mesh.geometry.clone();
+        }
+        const material = mesh.material;
+        if (Array.isArray(material)) {
+          mesh.material = material.map((entry) => entry.clone());
+        } else if (material) {
+          mesh.material = material.clone();
+        }
+      });
     }
 
     function createObjectFloorMoveGizmo(objectId: string) {
@@ -2511,11 +2664,20 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       const hitPoint = intersectDragPlane(plane);
       if (!hitPoint) return false;
 
+      const startAngle =
+        handle.kind === "rotateY"
+          ? getObjectRotationPointerAngle(hitPoint, startPoint)
+          : undefined;
       objectDragStateRef.current = {
         ...handle,
         pointerId: event.pointerId,
         plane,
-        offset: startPoint.clone().sub(hitPoint),
+        offset:
+          handle.kind === "floorPlane"
+            ? startPoint.clone().sub(hitPoint)
+            : new THREE.Vector3(),
+        startAngle,
+        startRotationY: object.rotationY,
       };
       latestRef.current.onSelect({ type: "object", id: handle.objectId });
       setHoveredObjectHandle(handle);
@@ -2534,6 +2696,24 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       if (!dragState) return;
       const hitPoint = intersectDragPlane(dragState.plane);
       if (!hitPoint) return;
+
+      if (dragState.kind === "rotateY") {
+        const object = latestRef.current.scene.objects.find(
+          (entry) => entry.id === dragState.objectId,
+        );
+        if (!object || dragState.startAngle === undefined) return;
+        const center = new THREE.Vector3(...object.position);
+        const currentAngle = getObjectRotationPointerAngle(hitPoint, center);
+        latestRef.current.onUpdateObject(dragState.objectId, {
+          rotationY: normalizeRadians(
+            (dragState.startRotationY ?? object.rotationY) +
+              currentAngle -
+              dragState.startAngle,
+          ),
+        });
+        return;
+      }
+
       const nextPoint = hitPoint.add(dragState.offset);
       const snappedPoint = getObjectPositionOnCollisionSurface(nextPoint) ?? nextPoint;
       latestRef.current.onUpdateObject(dragState.objectId, {
@@ -2553,6 +2733,13 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
         controlsRef.current.enabled = true;
       }
       updateHoveredObjectHandle();
+    }
+
+    function getObjectRotationPointerAngle(
+      point: THREE.Vector3,
+      center: THREE.Vector3,
+    ) {
+      return Math.atan2(point.x - center.x, point.z - center.z);
     }
 
     function intersectDragPlane(plane: THREE.Plane) {
@@ -2654,6 +2841,14 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
           material.opacity = hovered ? 1 : 0.95;
           material.needsUpdate = true;
         }
+        if (child.name === "ObjectRotationRing") {
+          const mesh = child as THREE.Mesh;
+          const material = mesh.material as THREE.MeshBasicMaterial;
+          material.color.setHex(hovered ? mesh.userData.hoverColor : mesh.userData.baseColor);
+          const scale = hovered ? mesh.userData.hoverScale : mesh.userData.baseScale;
+          mesh.scale.setScalar(scale);
+          material.needsUpdate = true;
+        }
       });
     }
 
@@ -2694,13 +2889,23 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       setPointerRaycasterFromCamera(editorCamera);
       const hitAreas: THREE.Object3D[] = [];
       objectRoot.traverse((child) => {
-        if (child.name === "ObjectFloorPlaneHitArea") {
+        if (
+          latestRef.current.viewMode === "rotate" &&
+          child.name === "ObjectRotationHitArea"
+        ) {
+          hitAreas.push(child);
+        }
+        if (
+          latestRef.current.viewMode === "move" &&
+          child.name === "ObjectFloorPlaneHitArea"
+        ) {
           hitAreas.push(child);
         }
       });
       const hits = raycasterRef.current.intersectObjects(hitAreas, false);
       if (hits[0]) return findObjectHandle(hits[0].object);
 
+      if (latestRef.current.viewMode === "rotate") return null;
       if (latestRef.current.selection.type !== "object") return null;
 
       const selectedObjectHits = raycasterRef.current.intersectObjects(
@@ -3122,19 +3327,34 @@ function lensToVerticalFov(lensMm: number) {
 function clearGroup(group: THREE.Group) {
   for (const child of [...group.children]) {
     group.remove(child);
-    child.traverse((node) => {
-      const mesh = node as THREE.Mesh;
-      if (mesh.geometry) {
-        mesh.geometry.dispose();
-      }
-      const material = mesh.material;
-      if (Array.isArray(material)) {
-        material.forEach((entry) => entry.dispose?.());
-      } else {
-        material?.dispose?.();
-      }
-    });
+    disposeObjectTree(child);
   }
+}
+
+function disposeObjectTree(object: THREE.Object3D) {
+  object.traverse((node) => {
+    const mesh = node as THREE.Mesh;
+    if (mesh.geometry) {
+      mesh.geometry.dispose();
+    }
+    const material = mesh.material;
+    if (Array.isArray(material)) {
+      material.forEach((entry) => entry.dispose?.());
+    } else {
+      material?.dispose?.();
+    }
+  });
+}
+
+function getFileExtension(fileName: string) {
+  const lastDot = fileName.lastIndexOf(".");
+  if (lastDot < 0 || lastDot === fileName.length - 1) return "";
+  return fileName.slice(lastDot + 1).toLowerCase();
+}
+
+function normalizeRadians(value: number) {
+  const fullTurn = Math.PI * 2;
+  return ((((value + Math.PI) % fullTurn) + fullTurn) % fullTurn) - Math.PI;
 }
 
 function vectorToTuple(vector: THREE.Vector3): [number, number, number] {
