@@ -12,6 +12,7 @@ import { clone as cloneSkeleton } from "three/examples/jsm/utils/SkeletonUtils.j
 import type {
   BoardObject,
   BoardObjectKind,
+  CharacterPose,
   DirectorCamera,
   DirectorScene,
   EditorViewpoint,
@@ -173,7 +174,7 @@ const HUMAN_MAX_GROUND_DROP = 1;
 const HUMAN_GROUND_RAY_HEADROOM = 0.25;
 const KEYBOARD_NAV_SPEED = 1.4;
 const KEYBOARD_NAV_VERTICAL_LOOK_THRESHOLD = 0.18;
-const DEFAULT_CAPTURE_SIZE = { width: 1440, height: 1080 };
+const DEFAULT_CAPTURE_SIZE = { width: 1920, height: 1080 };
 const PLACEABLE_SURFACE_MIN_UP = Math.cos(THREE.MathUtils.degToRad(35));
 const COLLISION_FLOOR_BAND_MIN_HEIGHT = 0.08;
 const COLLISION_FLOOR_LOW_QUANTILE = 0.05;
@@ -1781,10 +1782,11 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       } else {
         buildProp(fallback, object, selected);
       }
-      group.add(fallback);
 
       if (object.modelFile) {
         void loadObjectModelIntoGroup(group, fallback, object);
+      } else {
+        group.add(fallback);
       }
 
       if (selected) {
@@ -1836,18 +1838,30 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
     ) {
       try {
         const model = await loadObjectModel(object);
-        if (!group.parent) return;
+        if (!group.parent) {
+          disposeObjectTree(model);
+          disposeObjectTree(fallback);
+          return;
+        }
 
-        group.remove(fallback);
+        fallback.parent?.remove(fallback);
         disposeObjectTree(fallback);
         group.add(model);
-      } catch {
+      } catch (error) {
+        if (!group.parent) {
+          disposeObjectTree(fallback);
+          return;
+        }
+        if (!fallback.parent) {
+          group.add(fallback);
+        }
+        console.warn(`Could not load model for ${object.name}`, error);
         if (
           object.modelFile &&
           !failedObjectModelPathsRef.current.has(object.modelFile)
         ) {
           failedObjectModelPathsRef.current.add(object.modelFile);
-          latestRef.current.onStatus(`Could not load ${object.name} model; showing blockout fallback.`);
+          latestRef.current.onStatus(formatObjectModelLoadError(object, error));
         }
       }
     }
@@ -1871,7 +1885,8 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       const source = await sourcePromise;
       const model = cloneSkeleton(source) as THREE.Object3D;
       cloneRenderableResources(model);
-      prepareObjectModel(model, object.kind);
+      applyObjectModelColor(model, object.modelColor);
+      prepareObjectModel(model, object.kind, object.pose);
       return model;
     }
 
@@ -1886,7 +1901,11 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       return gltf.scene;
     }
 
-    function prepareObjectModel(model: THREE.Object3D, kind: BoardObjectKind) {
+    function prepareObjectModel(
+      model: THREE.Object3D,
+      kind: BoardObjectKind,
+      pose?: CharacterPose,
+    ) {
       model.name = "ObjectModel";
       model.traverse((node) => {
         const mesh = node as THREE.Mesh;
@@ -1914,6 +1933,120 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       model.position.x -= center.x;
       model.position.y -= normalizedBounds.min.y;
       model.position.z -= center.z;
+
+      if (kind === "character" && pose && pose !== "t-pose") {
+        const posedMeshes = applyCharacterPose(model, pose);
+        model.updateWorldMatrix(true, true);
+        refreshSkinnedMeshBounds(posedMeshes);
+        const posedBounds =
+          getSkinnedMeshWorldBounds(posedMeshes) ??
+          new THREE.Box3().setFromObject(model);
+        const posedCenter = posedBounds.getCenter(new THREE.Vector3());
+        model.position.x -= posedCenter.x;
+        model.position.y -= posedBounds.min.y;
+        model.position.z -= posedCenter.z;
+      }
+    }
+
+    function applyCharacterPose(
+      model: THREE.Object3D,
+      pose: Exclude<CharacterPose, "t-pose">,
+    ) {
+      const posedMeshes = getPrimaryCharacterSkins(model);
+      const bones = new Map<string, THREE.Bone[]>();
+      const addBone = (bone: THREE.Bone) => {
+        const name = normalizeBoneName(bone.name);
+        const matches = bones.get(name) ?? [];
+        if (!matches.includes(bone)) {
+          matches.push(bone);
+          bones.set(name, matches);
+        }
+      };
+
+      for (const skinnedMesh of posedMeshes) {
+        for (const bone of skinnedMesh.skeleton.bones) {
+          addBone(bone);
+        }
+      }
+      if (posedMeshes.length === 0) {
+        model.traverse((node) => {
+          const bone = node as THREE.Bone;
+          if (!bone.isBone) return;
+          addBone(bone);
+        });
+      }
+
+      const rotateBone = (
+        name: string,
+        rotation: [number, number, number],
+      ) => {
+        const matches = bones.get(name.toLowerCase());
+        if (!matches) return;
+        for (const bone of matches) {
+          const delta = new THREE.Quaternion().setFromEuler(
+            new THREE.Euler(...rotation, "XYZ"),
+          );
+          bone.quaternion.premultiply(delta);
+        }
+      };
+
+      rotateBone("leftarm", [1.28, 0, 0]);
+      rotateBone("rightarm", [1.28, 0, 0]);
+
+      if (pose === "sitting") {
+        rotateBone("leftupleg", [-1.35, 0, 0.06]);
+        rotateBone("rightupleg", [-1.35, 0, -0.06]);
+        rotateBone("leftleg", [-1.42, 0, 0]);
+        rotateBone("rightleg", [-1.42, 0, 0]);
+        rotateBone("leftfoot", [-0.08, 0, 0]);
+        rotateBone("rightfoot", [-0.08, 0, 0]);
+        rotateBone("spine", [0.08, 0, 0]);
+      }
+
+      return posedMeshes;
+    }
+
+    function getPrimaryCharacterSkins(model: THREE.Object3D) {
+      const skins: THREE.SkinnedMesh[] = [];
+      model.traverse((node) => {
+        const skinnedMesh = node as THREE.SkinnedMesh;
+        if (skinnedMesh.isSkinnedMesh) {
+          skins.push(skinnedMesh);
+        }
+      });
+      if (skins.length === 0) return skins;
+
+      skins.sort((a, b) => {
+        const aVertices = a.geometry.getAttribute("position")?.count ?? 0;
+        const bVertices = b.geometry.getAttribute("position")?.count ?? 0;
+        return bVertices - aVertices;
+      });
+      const primary = skins[0];
+      const primaryBones = new Set(primary.skeleton.bones);
+      return skins.filter(
+        (skin) =>
+          skin === primary ||
+          skin.skeleton.bones.some((bone) => primaryBones.has(bone)),
+      );
+    }
+
+    function refreshSkinnedMeshBounds(skinnedMeshes: THREE.SkinnedMesh[]) {
+      for (const skinnedMesh of skinnedMeshes) {
+        skinnedMesh.skeleton.update();
+        skinnedMesh.computeBoundingBox();
+        skinnedMesh.computeBoundingSphere();
+      }
+    }
+
+    function getSkinnedMeshWorldBounds(skinnedMeshes: THREE.SkinnedMesh[]) {
+      if (skinnedMeshes.length === 0) return undefined;
+
+      const bounds = new THREE.Box3();
+      for (const skinnedMesh of skinnedMeshes) {
+        if (!skinnedMesh.boundingBox) continue;
+        bounds.union(skinnedMesh.boundingBox);
+      }
+      return bounds.isEmpty() ? undefined : bounds;
     }
 
     function cloneRenderableResources(root: THREE.Object3D) {
@@ -1928,6 +2061,29 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
           mesh.material = material.map((entry) => entry.clone());
         } else if (material) {
           mesh.material = material.clone();
+        }
+      });
+    }
+
+    function applyObjectModelColor(
+      model: THREE.Object3D,
+      colorValue?: string,
+    ) {
+      if (!colorValue) return;
+      const color = new THREE.Color(colorValue);
+
+      model.traverse((node) => {
+        const mesh = node as THREE.Mesh;
+        if (!mesh.isMesh) return;
+        const materials = Array.isArray(mesh.material)
+          ? mesh.material
+          : [mesh.material];
+        for (const material of materials) {
+          const colorMaterial = material as THREE.Material & {
+            color?: THREE.Color;
+          };
+          colorMaterial.color?.copy(color);
+          material.needsUpdate = true;
         }
       });
     }
@@ -2169,7 +2325,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
     function createCameraViewFrame(camera: DirectorCamera, lookAt: THREE.Vector3) {
       const position = new THREE.Vector3(...camera.position);
       const distance = Math.max(position.distanceTo(lookAt), 0.001);
-      const frameAspect = 4 / 3;
+      const frameAspect = 16 / 9;
       const frameHeight =
         2 * distance * Math.tan(THREE.MathUtils.degToRad(lensToVerticalFov(camera.lens)) / 2);
       const frameWidth = frameHeight * frameAspect;
@@ -3575,4 +3731,26 @@ function waitForFrame(delayMs: number) {
   return new Promise<void>((resolve) => {
     window.setTimeout(resolve, delayMs);
   });
+}
+
+function normalizeBoneName(name: string) {
+  return name
+    .replace(/^.*[:|]/, "")
+    .replace(/^mixamorig/i, "")
+    .replace(/[^a-z0-9]/gi, "")
+    .toLowerCase();
+}
+
+function formatObjectModelLoadError(object: BoardObject, error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  const unsupportedFbxVersion = message.match(
+    /FBX version not supported,\s*FileVersion:\s*(\d+)/i,
+  )?.[1];
+
+  if (unsupportedFbxVersion) {
+    const major = Number.parseInt(unsupportedFbxVersion, 10) / 1000;
+    return `${object.name} uses unsupported FBX ${major}. Re-export it as FBX 7.x or GLB.`;
+  }
+
+  return `Could not load ${object.name} model; showing blockout fallback.`;
 }

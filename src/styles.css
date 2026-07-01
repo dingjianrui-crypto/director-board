@@ -548,7 +548,7 @@ h3 {
 .preview-window {
   display: grid;
   place-items: center;
-  aspect-ratio: 4 / 3;
+  aspect-ratio: 16 / 9;
   background:
     linear-gradient(180deg, rgba(41, 50, 61, 0.76), rgba(18, 23, 31, 0.6)),
     #1f2731;
@@ -606,7 +606,8 @@ h3 {
   font-size: 12px;
 }
 
-.field input {
+.field input,
+.field select {
   min-width: 0;
   height: 27px;
   padding: 0 8px;

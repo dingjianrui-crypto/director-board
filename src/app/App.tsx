@@ -40,6 +40,7 @@ import {
 import type {
   BoardObject,
   BoardObjectKind,
+  CharacterPose,
   DirectorCamera,
   DirectorScene,
   EditorViewpoint,
@@ -61,9 +62,14 @@ import {
 
 const frameOptions = ["EWS", "WS", "FS", "MS", "MCU", "CU", "ECU", "OTS"];
 const lensOptions = [14, 18, 24, 28, 35, 50, 65, 85, 100, 135];
+const characterPoseOptions: Array<{ label: string; value: CharacterPose }> = [
+  { label: "T Pose", value: "t-pose" },
+  { label: "Standing", value: "standing" },
+  { label: "Sitting", value: "sitting" },
+];
 const BUILT_IN_SCENE_MANIFEST_PATH = "/assets/environments/manifest.json";
 const BUILT_IN_OBJECT_CONFIG_PATH = "/assets/config.json";
-const SHOT_CAPTURE_SIZE = { width: 1440, height: 1080 };
+const SHOT_CAPTURE_SIZE = { width: 1920, height: 1080 };
 
 type BuiltInObjectItem = {
   type: BoardObjectKind;
@@ -225,11 +231,11 @@ export function App() {
           const image = selectedCamera
             ? await viewportRef.current?.capture(selectedCamera.id, {
                 width: 400,
-                height: 300,
+                height: 225,
               })
             : await viewportRef.current?.captureViewpoint({
                 width: 400,
-                height: 300,
+                height: 225,
               });
           if (cancelled) return;
           if (image || attempt >= 8) {
@@ -385,6 +391,7 @@ export function App() {
       position: [0.4 + index * 0.18, 0, 0.6],
       rotationY: 0,
       scale: getNewObjectScale(activeScene, currentSceneSizing),
+      pose: kind === "character" && options.modelFile ? "t-pose" : undefined,
     };
 
     updateScene((scene) => ({ ...scene, objects: [...scene.objects, object] }));
@@ -408,8 +415,18 @@ export function App() {
   }
 
   function addBuiltInObject(item: BuiltInObjectItem) {
+    const matchingCharacterCount =
+      item.type === "character"
+        ? activeScene.objects.filter(
+            (object) =>
+              object.kind === "character" && object.model === item.id,
+          ).length
+        : 0;
     addObject(item.type, item.id, {
-      name: item.name,
+      name:
+        item.type === "character"
+          ? `${item.name}-${matchingCharacterCount + 1}`
+          : item.name,
       modelFile: item.file,
       modelFileType: item.fileType,
     });
@@ -1142,6 +1159,26 @@ function ObjectInspector({
   return (
     <div className="inspector">
       <LabeledInput label="Name" value={object.name} onChange={(name) => onUpdate(object.id, { name })} />
+      {object.kind === "character" && object.modelFile && (
+        <label className="field">
+          <span>Pose</span>
+          <select
+            aria-label="Pose"
+            value={object.pose ?? (object.model === "seated" ? "sitting" : "standing")}
+            onChange={(event) =>
+              onUpdate(object.id, {
+                pose: event.target.value as CharacterPose,
+              })
+            }
+          >
+            {characterPoseOptions.map((pose) => (
+              <option key={pose.value} value={pose.value}>
+                {pose.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
       <VectorEditor label="Position" value={object.position} onChange={(position) => onUpdate(object.id, { position })} />
       <label className="field">
         <span>Rotation</span>
@@ -1168,7 +1205,18 @@ function ObjectInspector({
       </label>
       <label className="field">
         <span>Color</span>
-        <input type="color" value={object.color} onChange={(event) => onUpdate(object.id, { color: event.target.value })} />
+        <input
+          type="color"
+          value={object.modelFile ? object.modelColor ?? "#ffffff" : object.color}
+          onInput={(event) =>
+            onUpdate(
+              object.id,
+              object.modelFile
+                ? { modelColor: event.currentTarget.value }
+                : { color: event.currentTarget.value },
+            )
+          }
+        />
       </label>
     </div>
   );

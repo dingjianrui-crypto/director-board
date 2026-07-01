@@ -4,5 +4,11 @@
         "id": "warrior_1",
         "name": "warrior",
         "file": "/assets/characters/warrior.fbx"
+    },
+    {
+        "type": "character",
+        "id": "xbot_1",
+        "name": "xbot",
+        "file": "/assets/characters/xbot.fbx"
     }
 ]

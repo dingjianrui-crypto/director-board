@@ -61,6 +61,7 @@ export type SceneWorld = {
 export type SceneOrigin = "draft" | "built-in" | "user";
 
 export type BoardObjectKind = "character" | "prop";
+export type CharacterPose = "t-pose" | "standing" | "sitting";
 
 export type BoardObject = {
   id: string;
@@ -69,10 +70,12 @@ export type BoardObject = {
   model: string;
   modelFile?: string;
   modelFileType?: string;
+  modelColor?: string;
   color: string;
   position: Vector3Tuple;
   rotationY: number;
   scale: number;
+  pose?: CharacterPose;
 };
 
 export type DirectorCamera = {
