@@ -161,7 +161,22 @@ type Viewpoint = {
 
 type ScreenLabelAnchor = {
   element: HTMLSpanElement;
-  position: THREE.Vector3;
+  fallbackPosition: THREE.Vector3;
+  objectId?: string;
+  cameraId?: string;
+};
+
+type ScreenLabelPoint = {
+  x: number;
+  y: number;
+  visible: boolean;
+};
+
+type ScreenRect = {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
 };
 
 const SCAN_SCENE_SCALE = 3;
@@ -182,6 +197,16 @@ const REFERENCE_SCENE_HORIZONTAL_SPAN = 52;
 const MIN_ADAPTIVE_ENTITY_SCALE = 0.55;
 const MAX_ADAPTIVE_ENTITY_SCALE = 3;
 const SUPPORTED_OBJECT_MODEL_TYPES = new Set(["fbx", "glb", "gltf"]);
+const OBJECT_MOVE_GIZMO_TARGET_PX = 96;
+const OBJECT_ROTATE_GIZMO_TARGET_PX = 92;
+const CAMERA_AXIS_GIZMO_TARGET_PX = 104;
+const CAMERA_BILLBOARD_HANDLE_TARGET_PX = 48;
+const MIN_GIZMO_SCREEN_SCALE = 1;
+const MAX_GIZMO_SCREEN_SCALE = 8;
+const WEBGL_LABEL_HEIGHT = 0.16;
+const WEBGL_LABEL_GAP = 0.08;
+const SCREEN_BOUNDS_HIT_INSET = 10;
+const EDITOR_CANVAS_PIXEL_RATIO = 1;
 
 export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
   function ThreeViewport(
@@ -308,7 +333,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
         antialias: false,
         preserveDrawingBuffer: true,
       });
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setPixelRatio(EDITOR_CANVAS_PIXEL_RATIO);
       renderer.setSize(host.clientWidth, host.clientHeight);
       renderer.setClearColor(0x11161d, 1);
       renderer.shadowMap.enabled = true;
@@ -366,15 +391,26 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       cameraRootRef.current = cameraRoot;
       labelRootRef.current = labelRoot;
 
-      const onResize = () => {
+      const resizeRendererToHost = () => {
         const width = host.clientWidth;
         const height = host.clientHeight;
+        if (width <= 0 || height <= 0) return;
+        renderer.setPixelRatio(EDITOR_CANVAS_PIXEL_RATIO);
         renderer.setSize(width, height);
         editorCamera.aspect = width / height;
         editorCamera.updateProjectionMatrix();
+        syncCameraMatrices(editorCamera);
+        resetRendererViewport(renderer);
+        updateScreenLabels();
       };
+      const resizeObserver =
+        typeof ResizeObserver === "undefined"
+          ? undefined
+          : new ResizeObserver(resizeRendererToHost);
+      resizeObserver?.observe(host);
       const updatePointer = (event: PointerEvent) => {
         const rect = renderer.domElement.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return;
         pointerRef.current.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
         pointerRef.current.y = -(((event.clientY - rect.top) / rect.height) * 2 - 1);
       };
@@ -397,6 +433,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
         }
         updateHoveredCameraHandle();
         updateHoveredObjectHandle();
+        updateSelectableCursor();
       };
       const onPointerUp = (event: PointerEvent) => {
         stopCameraHandleDrag(event.pointerId);
@@ -424,7 +461,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
         if (document.visibilityState !== "visible") clearKeyboardNavigation();
       };
 
-      window.addEventListener("resize", onResize);
+      window.addEventListener("resize", resizeRendererToHost);
       window.addEventListener("keydown", onKeyDown);
       window.addEventListener("keyup", onKeyUp);
       window.addEventListener("blur", onBlur);
@@ -444,17 +481,22 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
         lastFrameTime = frameTime;
         updateKeyboardNavigation(deltaTime);
         controls.update();
+        syncCameraMatrices(editorCamera);
         publishEditorViewpoint(frameTime);
         updateScreenLabels();
         updateCameraHandleFacing();
+        updateScreenSizedGizmos();
         void sparkRef.current?.update?.({ scene: threeScene, camera: editorCamera });
+        resetRendererViewport(renderer);
+        renderer.clear(true, true, true);
         renderer.render(threeScene, editorCamera);
       };
       renderLoop();
 
       return () => {
         cancelAnimationFrame(rafId);
-        window.removeEventListener("resize", onResize);
+        resizeObserver?.disconnect();
+        window.removeEventListener("resize", resizeRendererToHost);
         window.removeEventListener("keydown", onKeyDown);
         window.removeEventListener("keyup", onKeyUp);
         window.removeEventListener("blur", onBlur);
@@ -848,6 +890,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       editorCamera.updateProjectionMatrix();
       controls.target.copy(target);
       controls.update();
+      syncCameraMatrices(editorCamera);
       framedSceneRef.current = claim;
       return true;
     }
@@ -872,6 +915,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       editorCamera.updateProjectionMatrix();
       controls.target.copy(viewpoint.target);
       controls.update();
+      syncCameraMatrices(editorCamera);
       framedSceneRef.current = claim;
       return true;
     }
@@ -1828,6 +1872,8 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       hitArea.rotation.x = Math.PI / 2;
       hitArea.position.y = 0.055;
       hitArea.userData.objectHandle = { objectId, kind: "rotateY" };
+      hitArea.userData.screenTargetPx = OBJECT_ROTATE_GIZMO_TARGET_PX;
+      hitArea.userData.screenBaseWorldSize = 1.52;
       return hitArea;
     }
 
@@ -2143,6 +2189,8 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       );
       hitArea.name = "ObjectFloorPlaneHitArea";
       hitArea.userData.objectHandle = { objectId, kind: "floorPlane" };
+      hitArea.userData.screenTargetPx = OBJECT_MOVE_GIZMO_TARGET_PX;
+      hitArea.userData.screenBaseWorldSize = planeSize * 1.6;
       handle.add(hitArea);
 
       const fill = new THREE.Mesh(
@@ -2387,6 +2435,8 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
     function createCameraFacingGizmo(cameraId: string) {
       const gizmo = new THREE.Group();
       gizmo.userData.cameraFacingGizmo = true;
+      gizmo.userData.screenTargetPx = CAMERA_AXIS_GIZMO_TARGET_PX;
+      gizmo.userData.screenBaseWorldSize = 0.74;
       gizmo.add(createCameraAxes());
       gizmo.add(createCameraAxisPlaneHandles(cameraId));
       gizmo.add(createCameraAxisPlaneGuides(cameraId));
@@ -2577,6 +2627,8 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       const handle = new THREE.Group();
       handle.userData.billboardHandle = true;
       handle.userData.cameraHandle = { cameraId, kind };
+      handle.userData.screenTargetPx = CAMERA_BILLBOARD_HANDLE_TARGET_PX;
+      handle.userData.screenBaseWorldSize = 0.46;
 
       const hitArea = new THREE.Mesh(
         new THREE.PlaneGeometry(0.46, 0.46),
@@ -2624,33 +2676,146 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       clearScreenLabels();
 
       const overlay = labelOverlayRef.current;
-      if (!overlay) return;
+      const useWebGLLabels = usesWebGLLabels();
       for (const object of latestRef.current.scene.objects) {
         const yOffset = object.kind === "character" ? 1.62 * object.scale : 1.62;
-        createScreenLabel(
-          object.name,
-          [
-            object.position[0],
-            object.position[1] + yOffset,
-            object.position[2],
-          ],
+        const selected =
           latestRef.current.selection.type === "object" &&
-            latestRef.current.selection.id === object.id,
-        );
+          latestRef.current.selection.id === object.id;
+        const fallbackPosition: [number, number, number] = [
+          object.position[0],
+          object.position[1] + yOffset,
+          object.position[2],
+        ];
+        if (useWebGLLabels && root) {
+          root.add(
+            createWebGLLabel(
+              object.name,
+              getObjectWorldLabelPosition(object.id) ??
+                new THREE.Vector3(...fallbackPosition),
+              selected,
+              { type: "object", id: object.id },
+            ),
+          );
+        } else if (overlay) {
+          createScreenLabel(object.name, fallbackPosition, selected, {
+            objectId: object.id,
+          });
+        }
       }
       for (const camera of latestRef.current.scene.cameras) {
-        createScreenLabel(
-          camera.name,
-          [
-            camera.position[0],
-            camera.position[1] + 0.36,
-            camera.position[2],
-          ],
+        const selected =
           latestRef.current.selection.type === "camera" &&
-            latestRef.current.selection.id === camera.id,
-        );
+          latestRef.current.selection.id === camera.id;
+        const fallbackPosition: [number, number, number] = [
+          camera.position[0],
+          camera.position[1] + 0.36,
+          camera.position[2],
+        ];
+        if (useWebGLLabels && root) {
+          root.add(
+            createWebGLLabel(
+              camera.name,
+              getCameraWorldLabelPosition(camera.id) ??
+                new THREE.Vector3(...fallbackPosition),
+              selected,
+              { type: "camera", id: camera.id },
+            ),
+          );
+        } else if (overlay) {
+          createScreenLabel(camera.name, fallbackPosition, selected, {
+            cameraId: camera.id,
+          });
+        }
       }
       updateScreenLabels();
+    }
+
+    function usesWebGLLabels() {
+      return latestRef.current.scene.assets.source === "procedural";
+    }
+
+    function createWebGLLabel(
+      text: string,
+      position: THREE.Vector3,
+      selected: boolean,
+      selection: Selection,
+    ) {
+      const canvas = document.createElement("canvas");
+      const context = canvas.getContext("2d");
+      const fontSize = 28;
+      const horizontalPadding = 14;
+      const verticalPadding = 7;
+
+      if (!context) {
+        return new THREE.Group();
+      }
+
+      context.font = `700 ${fontSize}px Inter, Arial, sans-serif`;
+      const textMetrics = context.measureText(text);
+      canvas.width = Math.ceil(textMetrics.width + horizontalPadding * 2);
+      canvas.height = Math.ceil(fontSize + verticalPadding * 2);
+
+      context.font = `700 ${fontSize}px Inter, Arial, sans-serif`;
+      context.textAlign = "center";
+      context.textBaseline = "middle";
+      context.fillStyle = selected
+        ? "rgba(39, 97, 166, 0.86)"
+        : "rgba(8, 11, 16, 0.76)";
+      drawRoundRect(context, 0, 0, canvas.width, canvas.height, 10);
+      context.fill();
+      context.fillStyle = "#ffffff";
+      context.shadowColor = "rgba(0, 0, 0, 0.88)";
+      context.shadowBlur = 6;
+      context.shadowOffsetY = 2;
+      context.fillText(text, canvas.width / 2, canvas.height / 2);
+
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.colorSpace = THREE.SRGBColorSpace;
+      texture.needsUpdate = true;
+      const material = new THREE.SpriteMaterial({
+        map: texture,
+        transparent: true,
+        depthTest: false,
+        depthWrite: false,
+      });
+      const sprite = new THREE.Sprite(material);
+      const aspect = canvas.width / canvas.height;
+      sprite.position.copy(position);
+      sprite.scale.set(WEBGL_LABEL_HEIGHT * aspect, WEBGL_LABEL_HEIGHT, 1);
+      sprite.center.set(0.5, 0);
+      sprite.renderOrder = 60;
+      sprite.userData.selection = selection;
+      sprite.userData.selectableLabel = true;
+      sprite.userData.labelText = text;
+      return sprite;
+    }
+
+    function drawRoundRect(
+      context: CanvasRenderingContext2D,
+      x: number,
+      y: number,
+      width: number,
+      height: number,
+      radius: number,
+    ) {
+      const resolvedRadius = Math.min(radius, width / 2, height / 2);
+      context.beginPath();
+      context.moveTo(x + resolvedRadius, y);
+      context.lineTo(x + width - resolvedRadius, y);
+      context.quadraticCurveTo(x + width, y, x + width, y + resolvedRadius);
+      context.lineTo(x + width, y + height - resolvedRadius);
+      context.quadraticCurveTo(
+        x + width,
+        y + height,
+        x + width - resolvedRadius,
+        y + height,
+      );
+      context.lineTo(x + resolvedRadius, y + height);
+      context.quadraticCurveTo(x, y + height, x, y + height - resolvedRadius);
+      context.lineTo(x, y + resolvedRadius);
+      context.quadraticCurveTo(x, y, x + resolvedRadius, y);
+      context.closePath();
     }
 
     function clearScreenLabels() {
@@ -2664,6 +2829,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       text: string,
       position: [number, number, number],
       selected: boolean,
+      target: Pick<ScreenLabelAnchor, "objectId" | "cameraId"> = {},
     ) {
       const overlay = labelOverlayRef.current;
       if (!overlay) return;
@@ -2676,34 +2842,238 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       overlay.appendChild(element);
       screenLabelAnchorsRef.current.push({
         element,
-        position: new THREE.Vector3(...position),
+        fallbackPosition: new THREE.Vector3(...position),
+        ...target,
       });
     }
 
     function updateScreenLabels() {
       const editorCamera = editorCameraRef.current;
-      const renderer = rendererRef.current;
       const overlay = labelOverlayRef.current;
-      if (!editorCamera || !renderer || !overlay) return;
+      if (!editorCamera || !overlay) return;
 
-      const width = renderer.domElement.clientWidth;
-      const height = renderer.domElement.clientHeight;
+      const { width, height } = overlay.getBoundingClientRect();
+      if (width <= 0 || height <= 0) return;
       const projected = new THREE.Vector3();
 
       for (const anchor of screenLabelAnchorsRef.current) {
-        projected.copy(anchor.position).project(editorCamera);
-        const visible =
-          latestRef.current.showLabels &&
-          projected.z >= -1 &&
-          projected.z <= 1;
+        const screenPoint = getScreenLabelPoint(
+          anchor,
+          editorCamera,
+          width,
+          height,
+          projected,
+        );
+        const visible = latestRef.current.showLabels && screenPoint.visible;
 
         anchor.element.hidden = !visible;
         if (!visible) continue;
 
-        anchor.element.style.transform = `translate(-50%, -100%) translate(${
-          ((projected.x + 1) / 2) * width
-        }px, ${((-projected.y + 1) / 2) * height}px)`;
+        anchor.element.style.transform = `translate(-50%, -100%) translate(${screenPoint.x}px, ${screenPoint.y}px)`;
       }
+    }
+
+    function getScreenLabelPoint(
+      anchor: ScreenLabelAnchor,
+      editorCamera: THREE.Camera,
+      width: number,
+      height: number,
+      projected: THREE.Vector3,
+    ): ScreenLabelPoint {
+      if (anchor.objectId) {
+        return (
+          getObjectScreenLabelPoint(anchor.objectId, editorCamera, width, height) ??
+          projectWorldLabelPoint(anchor.fallbackPosition, editorCamera, width, height, projected)
+        );
+      }
+      if (anchor.cameraId) {
+        return (
+          getCameraScreenLabelPoint(anchor.cameraId, editorCamera, width, height) ??
+          projectWorldLabelPoint(anchor.fallbackPosition, editorCamera, width, height, projected)
+        );
+      }
+      return projectWorldLabelPoint(
+        anchor.fallbackPosition,
+        editorCamera,
+        width,
+        height,
+        projected,
+      );
+    }
+
+    function getObjectScreenLabelPoint(
+      objectId: string,
+      editorCamera: THREE.Camera,
+      width: number,
+      height: number,
+    ) {
+      const root = objectRootRef.current?.children.find((child) => {
+        const selection = child.userData.selection as Selection | undefined;
+        return selection?.type === "object" && selection.id === objectId;
+      });
+      if (!root) return undefined;
+
+      const bounds = getRenderableObjectBounds(root);
+      if (!bounds || !isUsableBox(bounds)) return undefined;
+
+      return getBoundsScreenLabelPoint(bounds, editorCamera, width, height);
+    }
+
+    function getObjectWorldLabelPosition(objectId: string) {
+      const root = getObjectRootById(objectId);
+      if (!root) return undefined;
+
+      const bounds = getRenderableObjectBounds(root);
+      if (!bounds || !isUsableBox(bounds)) return undefined;
+
+      const center = bounds.getCenter(new THREE.Vector3());
+      return new THREE.Vector3(center.x, bounds.max.y + WEBGL_LABEL_GAP, center.z);
+    }
+
+    function getCameraScreenLabelPoint(
+      cameraId: string,
+      editorCamera: THREE.Camera,
+      width: number,
+      height: number,
+    ) {
+      const root = cameraRootRef.current?.children.find((child) =>
+        hasCameraSelection(child, cameraId),
+      );
+      if (!root) return undefined;
+
+      const bounds = getRenderableCameraBounds(root, cameraId);
+      if (!bounds || !isUsableBox(bounds)) return undefined;
+
+      return getBoundsScreenLabelPoint(bounds, editorCamera, width, height);
+    }
+
+    function getCameraWorldLabelPosition(cameraId: string) {
+      const root = getCameraRootById(cameraId);
+      if (!root) return undefined;
+
+      const bounds = getRenderableCameraBounds(root, cameraId);
+      if (!bounds || !isUsableBox(bounds)) return undefined;
+
+      const center = bounds.getCenter(new THREE.Vector3());
+      return new THREE.Vector3(center.x, bounds.max.y + WEBGL_LABEL_GAP, center.z);
+    }
+
+    function getObjectRootById(objectId: string) {
+      return objectRootRef.current?.children.find((child) => {
+        const selection = child.userData.selection as Selection | undefined;
+        return selection?.type === "object" && selection.id === objectId;
+      });
+    }
+
+    function getCameraRootById(cameraId: string) {
+      return cameraRootRef.current?.children.find((child) =>
+        hasCameraSelection(child, cameraId),
+      );
+    }
+
+    function getRenderableObjectBounds(root: THREE.Object3D) {
+      return getRenderableBounds(root, (mesh) => !findObjectHandle(mesh));
+    }
+
+    function getRenderableCameraBounds(root: THREE.Object3D, cameraId: string) {
+      return getRenderableBounds(root, (mesh) => {
+        const selection = findSelection(mesh) as Selection | undefined;
+        return selection?.type === "camera" && selection.id === cameraId;
+      });
+    }
+
+    function getRenderableBounds(
+      root: THREE.Object3D,
+      shouldIncludeMesh: (mesh: THREE.Mesh) => boolean,
+    ) {
+      root.updateWorldMatrix(true, true);
+      const bounds = new THREE.Box3();
+      const meshBounds = new THREE.Box3();
+      let hasBounds = false;
+
+      root.traverse((child) => {
+        const mesh = child as THREE.Mesh;
+        if (!mesh.isMesh || !mesh.geometry || !shouldIncludeMesh(mesh)) return;
+
+        if (!mesh.geometry.boundingBox) {
+          mesh.geometry.computeBoundingBox();
+        }
+        if (!mesh.geometry.boundingBox) return;
+
+        meshBounds.copy(mesh.geometry.boundingBox).applyMatrix4(mesh.matrixWorld);
+        bounds.union(meshBounds);
+        hasBounds = true;
+      });
+
+      return hasBounds ? bounds : undefined;
+    }
+
+    function hasCameraSelection(root: THREE.Object3D, cameraId: string) {
+      let found = false;
+      root.traverse((child) => {
+        if (found) return;
+        const selection = findSelection(child) as Selection | undefined;
+        found = selection?.type === "camera" && selection.id === cameraId;
+      });
+      return found;
+    }
+
+    function getBoundsScreenLabelPoint(
+      bounds: THREE.Box3,
+      editorCamera: THREE.Camera,
+      width: number,
+      height: number,
+    ): ScreenLabelPoint {
+      const rect = getBoundsScreenRect(bounds, editorCamera, width, height);
+      if (!rect) {
+        return { x: 0, y: 0, visible: false };
+      }
+
+      return {
+        x: (rect.minX + rect.maxX) / 2,
+        y: Math.max(0, rect.minY - 6),
+        visible: true,
+      };
+    }
+
+    function getBoundsScreenRect(
+      bounds: THREE.Box3,
+      editorCamera: THREE.Camera,
+      width: number,
+      height: number,
+    ) {
+      const points = getBoxCorners(bounds)
+        .map((corner) => projectWorldLabelPoint(corner, editorCamera, width, height))
+        .filter((point) => point.visible);
+      if (points.length === 0) return undefined;
+
+      let minX = Infinity;
+      let maxX = -Infinity;
+      let minY = Infinity;
+      let maxY = -Infinity;
+      for (const point of points) {
+        minX = Math.min(minX, point.x);
+        maxX = Math.max(maxX, point.x);
+        minY = Math.min(minY, point.y);
+        maxY = Math.max(maxY, point.y);
+      }
+
+      return { minX, minY, maxX, maxY } satisfies ScreenRect;
+    }
+
+    function projectWorldLabelPoint(
+      position: THREE.Vector3,
+      editorCamera: THREE.Camera,
+      width: number,
+      height: number,
+      target = new THREE.Vector3(),
+    ): ScreenLabelPoint {
+      target.copy(position).project(editorCamera);
+      return {
+        x: ((target.x + 1) / 2) * width,
+        y: ((-target.y + 1) / 2) * height,
+        visible: target.z >= -1 && target.z <= 1,
+      };
     }
 
     function updateCameraHandleFacing() {
@@ -2725,6 +3095,102 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
           child.quaternion.copy(facingQuaternion);
         }
       });
+    }
+
+    function updateScreenSizedGizmos() {
+      const editorCamera = editorCameraRef.current;
+      const renderer = rendererRef.current;
+      if (!editorCamera || !renderer) return;
+
+      const viewportHeight =
+        labelOverlayRef.current?.getBoundingClientRect().height ||
+        renderer.domElement.getBoundingClientRect().height;
+      if (viewportHeight <= 0) return;
+
+      const roots = [objectRootRef.current, cameraRootRef.current].filter(
+        Boolean,
+      ) as THREE.Object3D[];
+      for (const root of roots) {
+        root.traverse((child) => {
+          if (!isScreenSizedGizmo(child)) return;
+          applyScreenSizedGizmoScale(child, editorCamera, viewportHeight);
+        });
+      }
+    }
+
+    function isScreenSizedGizmo(object: THREE.Object3D) {
+      return (
+        typeof object.userData.screenTargetPx === "number" &&
+        typeof object.userData.screenBaseWorldSize === "number"
+      );
+    }
+
+    function applyScreenSizedGizmoScale(
+      object: THREE.Object3D,
+      editorCamera: THREE.Camera,
+      viewportHeight: number,
+    ) {
+      const worldPosition = object.getWorldPosition(new THREE.Vector3());
+      const unitsPerPixel = getWorldUnitsPerScreenPixel(
+        worldPosition,
+        editorCamera,
+        viewportHeight,
+      );
+      if (!Number.isFinite(unitsPerPixel) || unitsPerPixel <= 0) return;
+
+      const parentScale = object.parent?.getWorldScale(new THREE.Vector3());
+      const inheritedScale = parentScale
+        ? Math.max(
+            Math.abs(parentScale.x),
+            Math.abs(parentScale.y),
+            Math.abs(parentScale.z),
+            0.0001,
+          )
+        : 1;
+      const targetWorldSize = object.userData.screenTargetPx * unitsPerPixel;
+      const baseWorldSize = Math.max(object.userData.screenBaseWorldSize, 0.0001);
+      const scale = clamp(
+        targetWorldSize / (baseWorldSize * inheritedScale),
+        MIN_GIZMO_SCREEN_SCALE,
+        MAX_GIZMO_SCREEN_SCALE,
+      );
+
+      if (object.name === "ObjectRotationRing") {
+        object.userData.baseScale = scale;
+        object.userData.hoverScale = scale * 1.08;
+        const owner = findObjectHandle(object);
+        const hovered =
+          !!owner &&
+          !!hoveredObjectHandleRef.current &&
+          objectHandlesMatch(owner, hoveredObjectHandleRef.current);
+        object.scale.setScalar(hovered ? object.userData.hoverScale : scale);
+        return;
+      }
+
+      object.scale.setScalar(scale);
+    }
+
+    function getWorldUnitsPerScreenPixel(
+      worldPosition: THREE.Vector3,
+      camera: THREE.Camera,
+      viewportHeight: number,
+    ) {
+      if (camera instanceof THREE.PerspectiveCamera) {
+        const cameraPosition = camera.getWorldPosition(new THREE.Vector3());
+        const distance = cameraPosition.distanceTo(worldPosition);
+        const visibleHeight =
+          2 *
+          Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) *
+          distance /
+          Math.max(camera.zoom, 0.0001);
+        return visibleHeight / viewportHeight;
+      }
+
+      if (camera instanceof THREE.OrthographicCamera) {
+        return (camera.top - camera.bottom) / (viewportHeight * camera.zoom);
+      }
+
+      return 0;
     }
 
     function startCameraHandleDrag(event: PointerEvent) {
@@ -2909,6 +3375,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
     function setPointerRaycasterFromCamera(editorCamera: THREE.Camera) {
       raycasterRef.current.near = 0;
       raycasterRef.current.far = Infinity;
+      syncCameraMatrices(editorCamera);
       raycasterRef.current.setFromCamera(pointerRef.current, editorCamera);
     }
 
@@ -3006,6 +3473,25 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
           material.needsUpdate = true;
         }
       });
+    }
+
+    function updateSelectableCursor() {
+      const renderer = rendererRef.current;
+      const editorCamera = editorCameraRef.current;
+      if (
+        !renderer ||
+        !editorCamera ||
+        dragStateRef.current ||
+        objectDragStateRef.current ||
+        hoveredHandleRef.current ||
+        hoveredObjectHandleRef.current
+      ) {
+        return;
+      }
+
+      renderer.domElement.style.cursor = getSelectionHit(editorCamera)
+        ? "pointer"
+        : "";
     }
 
     function getCameraHandleHit() {
@@ -3151,7 +3637,32 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       const editorCamera = editorCameraRef.current;
       if (!threeScene || !editorCamera) return false;
 
+      const selected = getSelectionHit(editorCamera, { useGpuPick: true });
+      if (selected) {
+        latestRef.current.onSelect(selected as Selection);
+        return true;
+      }
+
+      return false;
+    }
+
+    function getSelectionHit(
+      editorCamera: THREE.Camera,
+      options: { useGpuPick?: boolean } = {},
+    ) {
       setPointerRaycasterFromCamera(editorCamera);
+
+      const screenLabelHit = getScreenSpaceLabelSelectionHit(editorCamera);
+      if (screenLabelHit) return screenLabelHit;
+
+      const labelHit = findFirstLabelSelectionHit();
+      if (labelHit) return labelHit;
+
+      const gpuSelected = options.useGpuPick
+        ? getGpuSelectionHit(editorCamera)
+        : undefined;
+      if (gpuSelected) return gpuSelected;
+
       const objectHits = raycasterRef.current.intersectObjects(
         objectRootRef.current?.children ?? [],
         true,
@@ -3161,12 +3672,351 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
         objectHit
           ? findSelection(objectHit.object)
           : findFirstCameraSelectionHit();
-      if (selected) {
-        latestRef.current.onSelect(selected as Selection);
-        return true;
+      return (
+        (selected as Selection | undefined) ??
+        getScreenSpaceBoundsSelectionHit(editorCamera)
+      );
+    }
+
+    function getScreenSpaceLabelSelectionHit(editorCamera: THREE.Camera) {
+      if (!usesWebGLLabels()) return undefined;
+
+      const pointer = getPointerViewportPoint();
+      if (!pointer) return undefined;
+
+      const labelRoot = labelRootRef.current;
+      if (!labelRoot?.visible) return undefined;
+
+      const hits: Array<{ selection: Selection; rect: ScreenRect; depth: number }> = [];
+      labelRoot.traverse((child) => {
+        const sprite = child as THREE.Sprite;
+        const selection = findSelection(sprite) as Selection | undefined;
+        if (!sprite.isSprite || !selection) return;
+
+        const rect = getSpriteScreenRect(
+          sprite,
+          editorCamera,
+          pointer.width,
+          pointer.height,
+        );
+        if (!rect || !isPointInsideScreenRect(pointer, rect, 0)) return;
+
+        const projected = sprite
+          .getWorldPosition(new THREE.Vector3())
+          .project(editorCamera);
+        if (projected.z < -1 || projected.z > 1) return;
+        hits.push({ selection, rect, depth: projected.z });
+      });
+
+      hits.sort((a, b) => {
+        const aArea = (a.rect.maxX - a.rect.minX) * (a.rect.maxY - a.rect.minY);
+        const bArea = (b.rect.maxX - b.rect.minX) * (b.rect.maxY - b.rect.minY);
+        return a.depth - b.depth || aArea - bArea;
+      });
+
+      if (hits[0]) {
+        return hits[0].selection;
       }
 
-      return false;
+      return undefined;
+    }
+
+    function getScreenSpaceBoundsSelectionHit(editorCamera: THREE.Camera) {
+      if (!usesWebGLLabels()) return undefined;
+
+      const pointer = getPointerViewportPoint();
+      if (!pointer) return undefined;
+
+      for (const object of latestRef.current.scene.objects) {
+        const root = getObjectRootById(object.id);
+        const bounds = root ? getRenderableObjectBounds(root) : undefined;
+        const rect =
+          bounds && isUsableBox(bounds)
+            ? getBoundsScreenRect(bounds, editorCamera, pointer.width, pointer.height)
+            : undefined;
+        if (rect && isPointInsideScreenRect(pointer, rect, SCREEN_BOUNDS_HIT_INSET)) {
+          return { type: "object", id: object.id } satisfies Selection;
+        }
+      }
+
+      for (const camera of latestRef.current.scene.cameras) {
+        const root = getCameraRootById(camera.id);
+        const bounds = root ? getRenderableCameraBounds(root, camera.id) : undefined;
+        const rect =
+          bounds && isUsableBox(bounds)
+            ? getBoundsScreenRect(bounds, editorCamera, pointer.width, pointer.height)
+            : undefined;
+        if (rect && isPointInsideScreenRect(pointer, rect, SCREEN_BOUNDS_HIT_INSET)) {
+          return { type: "camera", id: camera.id } satisfies Selection;
+        }
+      }
+
+      return undefined;
+    }
+
+    function getPointerViewportPoint() {
+      const renderer = rendererRef.current;
+      if (!renderer) return undefined;
+
+      const { width, height } = renderer.domElement.getBoundingClientRect();
+      if (width <= 0 || height <= 0) return undefined;
+
+      return {
+        x: ((pointerRef.current.x + 1) / 2) * width,
+        y: ((-pointerRef.current.y + 1) / 2) * height,
+        width,
+        height,
+      };
+    }
+
+    function isPointInsideScreenRect(
+      pointer: { x: number; y: number },
+      rect: ScreenRect,
+      inset: number,
+    ) {
+      return (
+        pointer.x >= rect.minX - inset &&
+        pointer.x <= rect.maxX + inset &&
+        pointer.y >= rect.minY - inset &&
+        pointer.y <= rect.maxY + inset
+      );
+    }
+
+    function getSpriteScreenRect(
+      sprite: THREE.Sprite,
+      editorCamera: THREE.Camera,
+      width: number,
+      height: number,
+    ): ScreenRect | undefined {
+      const position = sprite.getWorldPosition(new THREE.Vector3());
+      const scale = sprite.getWorldScale(new THREE.Vector3());
+      const cameraRight = new THREE.Vector3().setFromMatrixColumn(
+        editorCamera.matrixWorld,
+        0,
+      );
+      const cameraUp = new THREE.Vector3().setFromMatrixColumn(
+        editorCamera.matrixWorld,
+        1,
+      );
+      const left = -sprite.center.x * scale.x;
+      const right = (1 - sprite.center.x) * scale.x;
+      const bottom = -sprite.center.y * scale.y;
+      const top = (1 - sprite.center.y) * scale.y;
+      const corners = [
+        position
+          .clone()
+          .addScaledVector(cameraRight, left)
+          .addScaledVector(cameraUp, bottom),
+        position
+          .clone()
+          .addScaledVector(cameraRight, right)
+          .addScaledVector(cameraUp, bottom),
+        position
+          .clone()
+          .addScaledVector(cameraRight, right)
+          .addScaledVector(cameraUp, top),
+        position
+          .clone()
+          .addScaledVector(cameraRight, left)
+          .addScaledVector(cameraUp, top),
+      ];
+      const points = corners
+        .map((corner) => projectWorldLabelPoint(corner, editorCamera, width, height))
+        .filter((point) => point.visible);
+      if (points.length === 0) return undefined;
+
+      let minX = Infinity;
+      let maxX = -Infinity;
+      let minY = Infinity;
+      let maxY = -Infinity;
+      for (const point of points) {
+        minX = Math.min(minX, point.x);
+        maxX = Math.max(maxX, point.x);
+        minY = Math.min(minY, point.y);
+        maxY = Math.max(maxY, point.y);
+      }
+
+      return {
+        minX,
+        minY,
+        maxX,
+        maxY,
+      };
+    }
+
+    function getGpuSelectionHit(editorCamera: THREE.Camera) {
+      const renderer = rendererRef.current;
+      if (!renderer) return undefined;
+
+      const bufferSize = new THREE.Vector2();
+      renderer.getDrawingBufferSize(bufferSize);
+      const width = Math.max(1, Math.floor(bufferSize.x));
+      const height = Math.max(1, Math.floor(bufferSize.y));
+      const pixelX = clamp(
+        Math.floor(((pointerRef.current.x + 1) / 2) * width),
+        0,
+        width - 1,
+      );
+      const pixelY = clamp(
+        Math.floor(((-pointerRef.current.y + 1) / 2) * height),
+        0,
+        height - 1,
+      );
+      const pickScene = new THREE.Scene();
+      const selectionByColor = new Map<number, Selection>();
+      let colorIndex = 1;
+
+      const nextMaterial = (selection: Selection) => {
+        const color = colorIndex;
+        colorIndex += 1;
+        selectionByColor.set(color, selection);
+        return new THREE.MeshBasicMaterial({
+          color,
+          side: THREE.DoubleSide,
+          depthTest: true,
+          depthWrite: true,
+          toneMapped: false,
+        });
+      };
+
+      for (const object of latestRef.current.scene.objects) {
+        const root = getObjectRootById(object.id);
+        if (!root) continue;
+        addPickMeshesFromRoot(root, { type: "object", id: object.id }, nextMaterial, pickScene);
+      }
+
+      for (const camera of latestRef.current.scene.cameras) {
+        const root = getCameraRootById(camera.id);
+        if (!root) continue;
+        addPickMeshesFromRoot(root, { type: "camera", id: camera.id }, nextMaterial, pickScene);
+      }
+
+      const labelRoot = labelRootRef.current;
+      if (labelRoot?.visible) {
+        labelRoot.traverse((child) => {
+          const selection = findSelection(child) as Selection | undefined;
+          const sprite = child as THREE.Sprite;
+          if (!selection || !sprite.isSprite) return;
+
+          const color = colorIndex;
+          colorIndex += 1;
+          selectionByColor.set(color, selection);
+          const material = new THREE.SpriteMaterial({
+            color,
+            depthTest: false,
+            depthWrite: false,
+            toneMapped: false,
+          });
+          const pickSprite = new THREE.Sprite(material);
+          pickSprite.position.copy(sprite.getWorldPosition(new THREE.Vector3()));
+          pickSprite.scale.copy(sprite.getWorldScale(new THREE.Vector3()));
+          pickSprite.center.copy(sprite.center);
+          pickSprite.frustumCulled = false;
+          pickSprite.renderOrder = sprite.renderOrder;
+          pickScene.add(pickSprite);
+        });
+      }
+
+      const oldRenderTarget = renderer.getRenderTarget();
+      const oldViewport = new THREE.Vector4();
+      const oldScissor = new THREE.Vector4();
+      const oldClearColor = renderer.getClearColor(new THREE.Color());
+      const oldClearAlpha = renderer.getClearAlpha();
+      renderer.getViewport(oldViewport);
+      renderer.getScissor(oldScissor);
+      const oldScissorTest = renderer.getScissorTest();
+      const renderTarget = new THREE.WebGLRenderTarget(width, height, {
+        depthBuffer: true,
+        stencilBuffer: false,
+      });
+      const pixel = new Uint8Array(4);
+
+      try {
+        renderer.setRenderTarget(renderTarget);
+        renderer.setViewport(0, 0, width, height);
+        renderer.setScissor(0, 0, width, height);
+        renderer.setScissorTest(false);
+        renderer.setClearColor(0x000000, 1);
+        renderer.clear(true, true, true);
+        renderer.render(pickScene, editorCamera);
+        renderer.readRenderTargetPixels(
+          renderTarget,
+          pixelX,
+          height - pixelY - 1,
+          1,
+          1,
+          pixel,
+        );
+      } finally {
+        renderer.setRenderTarget(oldRenderTarget);
+        renderer.setViewport(oldViewport);
+        renderer.setScissor(oldScissor);
+        renderer.setScissorTest(oldScissorTest);
+        renderer.setClearColor(oldClearColor, oldClearAlpha);
+        renderTarget.dispose();
+        disposePickScene(pickScene);
+      }
+
+      const color = (pixel[0] << 16) | (pixel[1] << 8) | pixel[2];
+      return selectionByColor.get(color);
+    }
+
+    function disposePickScene(pickScene: THREE.Scene) {
+      pickScene.traverse((child) => {
+        const mesh = child as THREE.Mesh | THREE.Sprite;
+        const material = mesh.material;
+        if (Array.isArray(material)) {
+          material.forEach((entry) => entry.dispose());
+        } else {
+          material?.dispose();
+        }
+      });
+      pickScene.clear();
+    }
+
+    function addPickMeshesFromRoot(
+      root: THREE.Object3D,
+      selection: Selection,
+      createMaterial: (selection: Selection) => THREE.MeshBasicMaterial,
+      pickScene: THREE.Scene,
+    ) {
+      root.updateWorldMatrix(true, true);
+      root.traverse((child) => {
+        const mesh = child as THREE.Mesh;
+        if (!mesh.isMesh || !mesh.geometry || findObjectHandle(mesh)) return;
+
+        const meshSelection = findSelection(mesh) as Selection | undefined;
+        if (meshSelection && meshSelection.type !== selection.type) return;
+        if (
+          meshSelection &&
+          "id" in meshSelection &&
+          "id" in selection &&
+          meshSelection.id !== selection.id
+        ) {
+          return;
+        }
+
+        const pickMesh = new THREE.Mesh(
+          mesh.geometry,
+          createMaterial(selection),
+        );
+        pickMesh.matrix.copy(mesh.matrixWorld);
+        pickMesh.matrixAutoUpdate = false;
+        pickMesh.frustumCulled = false;
+        pickScene.add(pickMesh);
+      });
+    }
+
+    function findFirstLabelSelectionHit() {
+      const labelRoot = labelRootRef.current;
+      if (!labelRoot?.visible) return undefined;
+
+      const labelHits = raycasterRef.current.intersectObjects(
+        labelRoot.children,
+        true,
+      );
+      const hit = labelHits.find((item) => findSelection(item.object));
+      return hit ? findSelection(hit.object) : undefined;
     }
 
     function findFirstCameraSelectionHit() {
@@ -3349,13 +4199,10 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       const editorCamera = editorCameraRef.current;
       if (!editorCamera) return;
 
-      const bufferSize = new THREE.Vector2();
-      renderer.getDrawingBufferSize(bufferSize);
       await sparkRef.current?.update?.({ scene: threeScene, camera: editorCamera });
-      renderer.setRenderTarget(null);
-      renderer.setViewport(0, 0, bufferSize.x, bufferSize.y);
-      renderer.setScissor(0, 0, bufferSize.x, bufferSize.y);
-      renderer.setScissorTest(false);
+      syncCameraMatrices(editorCamera);
+      resetRendererViewport(renderer);
+      renderer.clear(true, true, true);
       renderer.render(threeScene, editorCamera);
     }
 
@@ -3374,6 +4221,20 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
         width: Math.max(1, Math.floor(width)),
         height: Math.max(1, Math.floor(height)),
       };
+    }
+
+    function resetRendererViewport(renderer: THREE.WebGLRenderer) {
+      const bufferSize = new THREE.Vector2();
+      renderer.getDrawingBufferSize(bufferSize);
+      renderer.setRenderTarget(null);
+      renderer.setViewport(0, 0, bufferSize.x, bufferSize.y);
+      renderer.setScissor(0, 0, bufferSize.x, bufferSize.y);
+      renderer.setScissorTest(false);
+    }
+
+    function syncCameraMatrices(camera: THREE.Camera) {
+      camera.updateMatrixWorld(true);
+      camera.matrixWorldInverse.copy(camera.matrixWorld).invert();
     }
 
     function canvasRegionToDataUrl(
@@ -3495,11 +4356,20 @@ function disposeObjectTree(object: THREE.Object3D) {
     }
     const material = mesh.material;
     if (Array.isArray(material)) {
-      material.forEach((entry) => entry.dispose?.());
+      material.forEach((entry) => {
+        disposeMaterialTexture(entry);
+        entry.dispose?.();
+      });
     } else {
+      disposeMaterialTexture(material);
       material?.dispose?.();
     }
   });
+}
+
+function disposeMaterialTexture(material: THREE.Material | undefined) {
+  const mappedMaterial = material as (THREE.Material & { map?: THREE.Texture }) | undefined;
+  mappedMaterial?.map?.dispose();
 }
 
 function getFileExtension(fileName: string) {
@@ -3523,6 +4393,19 @@ function vectorToTuple(vector: THREE.Vector3): [number, number, number] {
 
 function getHorizontalSpan(size: THREE.Vector3) {
   return Math.hypot(size.x, size.z);
+}
+
+function getBoxCorners(box: THREE.Box3) {
+  return [
+    new THREE.Vector3(box.min.x, box.min.y, box.min.z),
+    new THREE.Vector3(box.min.x, box.min.y, box.max.z),
+    new THREE.Vector3(box.min.x, box.max.y, box.min.z),
+    new THREE.Vector3(box.min.x, box.max.y, box.max.z),
+    new THREE.Vector3(box.max.x, box.min.y, box.min.z),
+    new THREE.Vector3(box.max.x, box.min.y, box.max.z),
+    new THREE.Vector3(box.max.x, box.max.y, box.min.z),
+    new THREE.Vector3(box.max.x, box.max.y, box.max.z),
+  ];
 }
 
 function getAdaptiveEntityScale(horizontalSpan: number) {

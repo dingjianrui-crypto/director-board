@@ -29,7 +29,7 @@ button {
 
 .app-shell {
   display: grid;
-  grid-template-rows: 40px 1fr 168px;
+  grid-template-rows: 40px minmax(0, 1fr) clamp(132px, 20vh, 168px);
   width: 100vw;
   height: 100vh;
   background: #0f1319;
@@ -184,12 +184,16 @@ button {
 
 .workspace {
   display: grid;
-  grid-template-columns: 250px minmax(520px, 1fr) 330px;
+  grid-template-columns:
+    clamp(200px, 19vw, 250px)
+    minmax(0, 1fr)
+    clamp(260px, 25vw, 330px);
   min-height: 0;
 }
 
 .left-panel,
 .right-panel {
+  min-width: 0;
   min-height: 0;
   overflow: auto;
   background: #12161d;
@@ -390,6 +394,8 @@ h3 {
   display: block;
   width: 100%;
   height: 100%;
+  touch-action: none;
+  user-select: none;
 }
 
 .viewport-labels {
@@ -817,10 +823,42 @@ h3 {
 
 @media (max-width: 1100px) {
   .workspace {
-    grid-template-columns: 220px minmax(420px, 1fr) 300px;
+    grid-template-columns: 190px minmax(0, 1fr) 270px;
+  }
+
+  .topbar {
+    gap: 6px;
+  }
+
+  .brand {
+    min-width: auto;
+  }
+
+  .brand span {
+    display: none;
+  }
+
+  .scene-title label:first-child,
+  .scene-title label:nth-child(2) {
+    width: min(24vw, 180px);
   }
 
   .camera-preview {
     width: 260px;
+  }
+}
+
+@media (max-width: 900px) {
+  .workspace {
+    grid-template-columns: 168px minmax(0, 1fr) 238px;
+  }
+
+  .segmented button,
+  .toolbar-button {
+    padding-inline: 7px;
+  }
+
+  .camera-preview {
+    width: 220px;
   }
 }
