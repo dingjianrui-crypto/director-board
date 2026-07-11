@@ -205,7 +205,6 @@ const MIN_GIZMO_SCREEN_SCALE = 1;
 const MAX_GIZMO_SCREEN_SCALE = 8;
 const WEBGL_LABEL_HEIGHT = 0.16;
 const WEBGL_LABEL_GAP = 0.08;
-const SCREEN_BOUNDS_HIT_INSET = 10;
 const EDITOR_CANVAS_PIXEL_RATIO = 1;
 
 export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
@@ -3270,8 +3269,19 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       const handle = getObjectHandleHit();
       if (!handle) return false;
 
+      const editorCamera = editorCameraRef.current;
       const renderer = rendererRef.current;
-      if (!renderer) return false;
+      if (!editorCamera || !renderer) return false;
+
+      if (handle.kind === "floorPlane") {
+        const selectionAtPointer = getSelectionHit(editorCamera, { useGpuPick: true });
+        if (
+          selectionAtPointer &&
+          !selectionMatchesObject(selectionAtPointer as Selection, handle.objectId)
+        ) {
+          return false;
+        }
+      }
 
       const object = latestRef.current.scene.objects.find(
         (entry) => entry.id === handle.objectId,
@@ -3311,6 +3321,10 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       event.preventDefault();
       event.stopPropagation();
       return true;
+    }
+
+    function selectionMatchesObject(selection: Selection, objectId: string) {
+      return selection.type === "object" && selection.id === objectId;
     }
 
     function dragObjectHandle() {
@@ -3537,12 +3551,6 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
         ) {
           hitAreas.push(child);
         }
-        if (
-          latestRef.current.viewMode === "move" &&
-          child.name === "ObjectFloorPlaneHitArea"
-        ) {
-          hitAreas.push(child);
-        }
       });
       const hits = raycasterRef.current.intersectObjects(hitAreas, false);
       if (hits[0]) return findObjectHandle(hits[0].object);
@@ -3555,6 +3563,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
         true,
       );
       for (const hit of selectedObjectHits) {
+        if (hit.object.name === "ObjectFloorPlaneHitArea") continue;
         const selection = findSelection(hit.object) as Selection | undefined;
         if (
           selection?.type === "object" &&
@@ -3658,24 +3667,20 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
       const labelHit = findFirstLabelSelectionHit();
       if (labelHit) return labelHit;
 
-      const gpuSelected = options.useGpuPick
-        ? getGpuSelectionHit(editorCamera)
-        : undefined;
-      if (gpuSelected) return gpuSelected;
-
       const objectHits = raycasterRef.current.intersectObjects(
         objectRootRef.current?.children ?? [],
         true,
       );
-      const objectHit = objectHits.find((item) => findSelection(item.object));
+      const objectHit = objectHits.find(
+        (item) => findSelection(item.object) && !findObjectHandle(item.object),
+      );
       const selected =
         objectHit
           ? findSelection(objectHit.object)
           : findFirstCameraSelectionHit();
-      return (
-        (selected as Selection | undefined) ??
-        getScreenSpaceBoundsSelectionHit(editorCamera)
-      );
+      if (selected) return selected as Selection;
+
+      return options.useGpuPick ? getGpuSelectionHit(editorCamera) : undefined;
     }
 
     function getScreenSpaceLabelSelectionHit(editorCamera: THREE.Camera) {
@@ -3716,39 +3721,6 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, Props>(
 
       if (hits[0]) {
         return hits[0].selection;
-      }
-
-      return undefined;
-    }
-
-    function getScreenSpaceBoundsSelectionHit(editorCamera: THREE.Camera) {
-      if (!usesWebGLLabels()) return undefined;
-
-      const pointer = getPointerViewportPoint();
-      if (!pointer) return undefined;
-
-      for (const object of latestRef.current.scene.objects) {
-        const root = getObjectRootById(object.id);
-        const bounds = root ? getRenderableObjectBounds(root) : undefined;
-        const rect =
-          bounds && isUsableBox(bounds)
-            ? getBoundsScreenRect(bounds, editorCamera, pointer.width, pointer.height)
-            : undefined;
-        if (rect && isPointInsideScreenRect(pointer, rect, SCREEN_BOUNDS_HIT_INSET)) {
-          return { type: "object", id: object.id } satisfies Selection;
-        }
-      }
-
-      for (const camera of latestRef.current.scene.cameras) {
-        const root = getCameraRootById(camera.id);
-        const bounds = root ? getRenderableCameraBounds(root, camera.id) : undefined;
-        const rect =
-          bounds && isUsableBox(bounds)
-            ? getBoundsScreenRect(bounds, editorCamera, pointer.width, pointer.height)
-            : undefined;
-        if (rect && isPointInsideScreenRect(pointer, rect, SCREEN_BOUNDS_HIT_INSET)) {
-          return { type: "camera", id: camera.id } satisfies Selection;
-        }
       }
 
       return undefined;
